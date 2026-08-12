@@ -717,6 +717,36 @@ async fn live_app_server_warning_notification_renders_message() {
 }
 
 #[tokio::test]
+async fn live_app_server_wake_up_notification_renders_source() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::ThreadWokeUp(codex_app_server_protocol::ThreadWokeUpNotification {
+            thread_id: "thread-1".to_string(),
+            source: codex_app_server_protocol::ThreadWakeUpSource::Terminal,
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::ThreadWokeUp(codex_app_server_protocol::ThreadWokeUpNotification {
+            thread_id: "thread-1".to_string(),
+            source: codex_app_server_protocol::ThreadWakeUpSource::Subagent,
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 2, "expected two wake-up history cells");
+    let rendered = cells
+        .iter()
+        .map(Vec::as_slice)
+        .map(lines_to_single_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("wake_up_notices", rendered);
+}
+
+#[tokio::test]
 async fn live_app_server_guardian_warning_notification_renders_message() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

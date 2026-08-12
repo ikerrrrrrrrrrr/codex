@@ -5,6 +5,7 @@ use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::WakeUpSource;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
@@ -42,6 +43,12 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    non_user_wakes: Mutex<VecDeque<PendingNonUserWake>>,
+}
+
+struct PendingNonUserWake {
+    input: TurnInput,
+    source: WakeUpSource,
 }
 
 struct PendingMailboxCommunication {
@@ -56,6 +63,7 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            non_user_wakes: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -100,6 +108,38 @@ impl InputQueue {
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
         !self.mailbox_pending_mails.lock().await.is_empty()
+    }
+
+    /// Queues runtime work that should be consumed by the active turn or wake the next one.
+    pub(crate) async fn enqueue_non_user_wake(&self, input: TurnInput, source: WakeUpSource) {
+        debug_assert!(!matches!(input, TurnInput::UserInput { .. }));
+        self.non_user_wakes
+            .lock()
+            .await
+            .push_back(PendingNonUserWake { input, source });
+    }
+
+    pub(crate) async fn has_pending_non_user_wakes(&self) -> bool {
+        !self.non_user_wakes.lock().await.is_empty()
+    }
+
+    async fn drain_non_user_wakes(&self) -> Vec<TurnInput> {
+        self.non_user_wakes
+            .lock()
+            .await
+            .drain(..)
+            .map(|wake| wake.input)
+            .collect()
+    }
+
+    pub(crate) async fn pending_wake_source(&self) -> Option<WakeUpSource> {
+        if let Some(wake) = self.non_user_wakes.lock().await.front() {
+            Some(wake.source)
+        } else if self.has_pending_mailbox_items().await {
+            Some(WakeUpSource::Subagent)
+        } else {
+            None
+        }
     }
 
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
@@ -254,7 +294,8 @@ impl InputQueue {
         if !accepts_mailbox_delivery {
             return (pending_input, None);
         }
-        let (mailbox_items, parent_turn_id) = self.drain_mailbox_input_items().await;
+        let (mut mailbox_items, parent_turn_id) = self.drain_mailbox_input_items().await;
+        mailbox_items.extend(self.drain_non_user_wakes().await);
         if pending_input.is_empty() {
             (mailbox_items, parent_turn_id)
         } else {
@@ -288,7 +329,7 @@ impl InputQueue {
         if has_turn_pending_input {
             return true;
         }
-        self.has_pending_mailbox_items().await
+        self.has_pending_mailbox_items().await || self.has_pending_non_user_wakes().await
     }
 }
 

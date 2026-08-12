@@ -10,6 +10,7 @@ use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use crate::unified_exec::process::NoopSpawnLifecycle;
 use crate::unified_exec::process::UnifiedExecProcess;
+use crate::unified_exec::process_manager::InitialExecCommandState;
 use codex_protocol::items::CommandExecutionStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
@@ -171,6 +172,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         transcript,
         Instant::now(),
         Some(network_denial_monitor),
+        InitialExecCommandState::completed(/*returned_background*/ false),
     );
 
     let exited_at = Instant::now();

@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadWakeUpSource": {
+      "enum": [
+        "terminal",
+        "subagent"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "source": {
+      "$ref": "#/definitions/ThreadWakeUpSource"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "source",
+    "threadId"
+  ],
+  "title": "ThreadWokeUpNotification",
+  "type": "object"
+}

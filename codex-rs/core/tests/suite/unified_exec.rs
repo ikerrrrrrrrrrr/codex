@@ -193,6 +193,21 @@ async fn submit_unified_exec_turn(
     prompt: &str,
     permission_profile: PermissionProfile,
 ) -> Result<()> {
+    submit_unified_exec_turn_with_mode(
+        test,
+        prompt,
+        permission_profile,
+        codex_protocol::config_types::ModeKind::Default,
+    )
+    .await
+}
+
+async fn submit_unified_exec_turn_with_mode(
+    test: &TestCodex,
+    prompt: &str,
+    permission_profile: PermissionProfile,
+    mode: codex_protocol::config_types::ModeKind,
+) -> Result<()> {
     let session_model = test.session_configured.model.clone();
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(permission_profile, test.config.cwd.as_path());
@@ -211,7 +226,7 @@ async fn submit_unified_exec_turn(
                 sandbox_policy: Some(sandbox_policy),
                 permission_profile,
                 collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
+                    mode,
                     settings: codex_protocol::config_types::Settings {
                         model: session_model,
                         reasoning_effort: None,
@@ -224,6 +239,42 @@ async fn submit_unified_exec_turn(
         .await?;
 
     Ok(())
+}
+
+async fn build_unified_exec_test(server: &wiremock::MockServer) -> Result<TestCodex> {
+    let mut builder = test_codex().with_config(|config| {
+        config.use_experimental_unified_exec_tool = true;
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+    });
+    builder.build_with_auto_env(server).await
+}
+
+fn tool_response(response_id: &str, call_id: &str, tool: &str, args: &Value) -> Result<String> {
+    Ok(sse(vec![
+        ev_response_created(response_id),
+        ev_function_call(call_id, tool, &serde_json::to_string(args)?),
+        ev_completed(response_id),
+    ]))
+}
+
+fn assistant_response(response_id: &str, message_id: &str, text: &str) -> String {
+    sse(vec![
+        ev_response_created(response_id),
+        ev_assistant_message(message_id, text),
+        ev_completed(response_id),
+    ])
+}
+
+async fn wait_for_turn_completions(test: &TestCodex, count: usize) {
+    for _ in 0..count {
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
 }
 
 async fn create_workspace_directory(
@@ -941,6 +992,342 @@ async fn unified_exec_full_lifecycle_with_background_end_event() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_terminal_completion_starts_a_new_turn() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_unified_exec_test(&server).await?;
+    let call_id = "uexec-background-wake";
+    let args = json!({
+        "cmd": "sleep 0.6; printf 'WAKE-ON-EXIT-MARKER'",
+        "yield_time_ms": 250,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            tool_response("resp-1", call_id, "exec_command", &args)?,
+            assistant_response("resp-2", "msg-1", "waiting for the terminal"),
+            assistant_response("resp-3", "msg-2", "resumed after terminal completion"),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(&test, "start a wake terminal", PermissionProfile::Disabled).await?;
+
+    let mut completed_turns = 0;
+    let mut wake_up_seen = false;
+    while completed_turns < 2 {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::WakeUp(event) => {
+                assert_eq!(
+                    event.source,
+                    codex_protocol::protocol::WakeUpSource::Terminal
+                );
+                wake_up_seen = true;
+            }
+            EventMsg::TurnStarted(_) if completed_turns == 1 => {
+                assert!(
+                    wake_up_seen,
+                    "wake-up event must precede the automatic turn"
+                );
+            }
+            EventMsg::TurnComplete(_) => completed_turns += 1,
+            _ => {}
+        }
+    }
+    assert!(wake_up_seen, "expected a terminal wake-up event");
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let wake_request = requests[2].body_json().to_string();
+    assert!(wake_request.contains("<background_terminal_completion>"));
+    assert!(wake_request.contains("WAKE-ON-EXIT-MARKER"));
+    assert!(wake_request.contains("process_id"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_terminal_completion_waits_for_user_input_in_plan_mode() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_unified_exec_test(&server).await?;
+    let call_id = "uexec-plan-background-wake";
+    let args = json!({
+        "cmd": "sleep 1; printf 'PLAN-WAKE-ON-EXIT-MARKER'",
+        "yield_time_ms": 250,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            tool_response("resp-plan-1", call_id, "exec_command", &args)?,
+            assistant_response("resp-plan-2", "msg-plan-1", "waiting for the terminal"),
+            assistant_response("resp-plan-3", "msg-plan-2", "handled on the next user turn"),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn_with_mode(
+        &test,
+        "start a terminal while planning",
+        PermissionProfile::Disabled,
+        codex_protocol::config_types::ModeKind::Plan,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ExecCommandEnd(event) if event.call_id == call_id
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(responses.requests().len(), 2);
+
+    submit_unified_exec_turn_with_mode(
+        &test,
+        "use the completed terminal result",
+        PermissionProfile::Disabled,
+        codex_protocol::config_types::ModeKind::Plan,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let user_request = requests[2].body_json().to_string();
+    assert!(user_request.contains("<background_terminal_completion>"));
+    assert!(user_request.contains("PLAN-WAKE-ON-EXIT-MARKER"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminating_a_background_terminal_does_not_wake_the_model() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_unified_exec_test(&server).await?;
+    let call_id = "uexec-background-terminated";
+    let args = json!({
+        "cmd": "sleep 10",
+        "yield_time_ms": 250,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            tool_response("resp-terminate-1", call_id, "exec_command", &args)?,
+            assistant_response("resp-terminate-2", "msg-terminate", "terminal is running"),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "start and then terminate a background terminal",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert!(test.codex.terminate_background_terminal(1_000).await);
+    wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ExecCommandEnd(event) if event.call_id == call_id
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(responses.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_terminal_completion_joins_an_active_turn_after_its_tool_call() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses POSIX shell synchronization");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_unified_exec_test(&server).await?;
+    let background_call_id = "uexec-active-turn-background";
+    let foreground_call_id = "uexec-active-turn-foreground";
+    let marker = ".terminal-wake-active-turn-trigger";
+    let background_args = json!({
+        "cmd": format!(
+            "while [ ! -f {marker} ]; do sleep 0.05; done; printf 'BACKGROUND-COMPLETED'"
+        ),
+        "yield_time_ms": 250,
+    });
+    let foreground_args = json!({
+        "cmd": format!(
+            "touch {marker}; sleep 0.75; printf 'FOREGROUND-TOOL-COMPLETED'"
+        ),
+        "yield_time_ms": 2_000,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            tool_response(
+                "resp-background-start",
+                background_call_id,
+                "exec_command",
+                &background_args,
+            )?,
+            assistant_response(
+                "resp-background-yield",
+                "msg-background-yield",
+                "background terminal is running",
+            ),
+            tool_response(
+                "resp-active-tool",
+                foreground_call_id,
+                "exec_command",
+                &foreground_args,
+            )?,
+            assistant_response(
+                "resp-combined-results",
+                "msg-combined-results",
+                "processed foreground and background results together",
+            ),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "start a background terminal",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "run foreground work while the terminal is pending",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    let mut wake_up_seen = false;
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::WakeUp(_) => wake_up_seen = true,
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+    assert!(
+        !wake_up_seen,
+        "completion joined an active turn and must not emit an idle wake"
+    );
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 4);
+    let combined_request = &requests[3];
+    assert!(
+        combined_request
+            .function_call_output(foreground_call_id)
+            .to_string()
+            .contains("FOREGROUND-TOOL-COMPLETED")
+    );
+    let combined_body = combined_request.body_json().to_string();
+    assert!(combined_body.contains("<background_terminal_completion>"));
+    assert!(combined_body.contains("BACKGROUND-COMPLETED"));
+    assert!(combined_body.contains(foreground_call_id));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_terminal_tail_is_immediate_non_consuming_and_preserves_wake() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_unified_exec_test(&server).await?;
+    let start_call_id = "uexec-background-tail-start";
+    let tail_call_id = "uexec-background-tail-read";
+    let start_args = json!({
+        "cmd": "sleep 0.6; printf 'TAIL-LINE-1\\nTAIL-LINE-2\\n'; sleep 2; printf 'WAKE-AFTER-TAIL\\n'",
+        "yield_time_ms": 250,
+    });
+    let tail_args = json!({
+        "session_id": 1000,
+        "tail_output_lines": 1,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            tool_response("resp-1", start_call_id, "exec_command", &start_args)?,
+            assistant_response("resp-2", "msg-1", "terminal remains in the background"),
+            tool_response("resp-3", tail_call_id, "write_stdin", &tail_args)?,
+            assistant_response("resp-4", "msg-2", "tail inspected"),
+            assistant_response("resp-5", "msg-3", "terminal completion handled"),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(&test, "start a live terminal", PermissionProfile::Disabled).await?;
+
+    let mut output_seen = false;
+    let mut turn_complete = false;
+    while !output_seen || !turn_complete {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::ExecCommandOutputDelta(event) if event.call_id == start_call_id => {
+                output_seen |= String::from_utf8_lossy(&event.chunk).contains("TAIL-LINE-2");
+            }
+            EventMsg::TurnComplete(_) => turn_complete = true,
+            _ => {}
+        }
+    }
+
+    submit_unified_exec_turn(&test, "inspect its tail", PermissionProfile::Disabled).await?;
+
+    wait_for_turn_completions(&test, 2).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 5);
+    let bodies = requests
+        .iter()
+        .map(core_test_support::responses::ResponsesRequest::body_json)
+        .collect::<Vec<_>>();
+    let outputs = collect_tool_outputs(&bodies)?;
+    let tail_output = outputs
+        .get(tail_call_id)
+        .expect("missing live terminal tail output");
+    assert_eq!(tail_output.wall_time_seconds, 0.0);
+    assert_eq!(tail_output.process_id.as_deref(), Some("1000"));
+    assert_eq!(tail_output.exit_code, None);
+    assert_eq!(tail_output.output, "TAIL-LINE-2");
+
+    let wake_request = requests[4].body_json().to_string();
+    assert!(wake_request.contains("<background_terminal_completion>"));
+    assert!(wake_request.contains("TAIL-LINE-1"));
+    assert!(wake_request.contains("TAIL-LINE-2"));
+    assert!(wake_request.contains("WAKE-AFTER-TAIL"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_network_denial_emits_failed_background_end_event() -> Result<()> {
     // TODO(anp): Remove after network-denial fixtures use target-native commands.
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network-denial fixture");
@@ -981,6 +1368,53 @@ async fn unified_exec_network_denial_emits_failed_background_end_event() -> Resu
         })
         .await;
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_background_terminal_wakes_with_failure_context() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses the POSIX/Python network-denial fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let (test, sandbox_policy) = unified_exec_network_denial_test(&server).await?;
+    let call_id = "uexec-network-denied-wake";
+    let args = json!({
+        "cmd": "python3 -c \"import os, socket, time, urllib.parse; time.sleep(1.5); proxy = urllib.parse.urlparse(os.environ['HTTP_PROXY']); sock = socket.create_connection((proxy.hostname, proxy.port), timeout=2); sock.sendall(b'GET http://codex-network-denied-wake.invalid/ HTTP/1.1\\r\\nHost: codex-network-denied-wake.invalid\\r\\n\\r\\n'); sock.recv(1024); time.sleep(5)\"",
+        "yield_time_ms": 50,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            tool_response("resp-denied-wake-1", call_id, "exec_command", &args)?,
+            assistant_response(
+                "resp-denied-wake-2",
+                "msg-denied-wake-1",
+                "waiting for denial",
+            ),
+            assistant_response(
+                "resp-denied-wake-3",
+                "msg-denied-wake-2",
+                "handled failed terminal",
+            ),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(&test, "exercise failed terminal wake", sandbox_policy).await?;
+    let (end_event, turn_completed) = wait_for_unified_exec_end(&test, call_id, &responses).await;
+    assert_eq!(end_event.status, ExecCommandStatus::Failed);
+    assert_eq!(end_event.exit_code, -1);
+
+    wait_for_turn_completions(&test, 2 - usize::from(turn_completed)).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let wake_request = requests[2].body_json().to_string();
+    assert!(wake_request.contains("<background_terminal_completion>"));
+    assert!(wake_request.contains("Network access"));
+    assert!(wake_request.contains("\\\"exit_code\\\":-1"));
     Ok(())
 }
 

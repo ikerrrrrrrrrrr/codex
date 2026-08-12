@@ -120,6 +120,12 @@ pub(crate) struct WriteStdinRequest<'a> {
     pub interaction_event: Option<WriteStdinInteractionEvent<'a>>,
 }
 
+pub(crate) fn tail_output_lines(output: &str, count: usize) -> String {
+    let mut lines = output.lines().rev().take(count).collect::<Vec<_>>();
+    lines.reverse();
+    lines.join("\n")
+}
+
 pub(crate) struct WriteStdinInteractionEvent<'a> {
     pub session: &'a Arc<Session>,
     pub turn: &'a Arc<TurnContext>,
@@ -171,6 +177,8 @@ struct ProcessEntry {
     process_id: i32,
     cwd: PathUri,
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
+    initial_exec_command_state: Arc<process_manager::InitialExecCommandState>,
+    transcript: Arc<tokio::sync::Mutex<head_tail_buffer::HeadTailBuffer>>,
     hook_command: String,
     tty: bool,
     network_approval: Option<DeferredNetworkApproval>,

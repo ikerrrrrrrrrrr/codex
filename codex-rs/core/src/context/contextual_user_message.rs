@@ -3,6 +3,7 @@ use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
 
 use super::AdditionalContextUserFragment;
+use super::BackgroundTerminalCompletion;
 use super::ContextualUserFragment;
 use super::InternalModelContextFragment;
 use super::LegacyApplyPatchExecCommandWarning;
@@ -17,6 +18,7 @@ use super::world_state::EnvironmentsState;
 
 const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     UserInstructions::matches_text,
+    BackgroundTerminalCompletion::matches_text,
     EnvironmentsState::matches_text,
     AdditionalContextUserFragment::matches_text,
     codex_skills_extension::is_skill_prompt_fragment,

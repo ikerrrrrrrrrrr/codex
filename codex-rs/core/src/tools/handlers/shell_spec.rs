@@ -115,19 +115,22 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         (
             "session_id".to_string(),
             JsonSchema::number(Some(
-                "Identifier of the running unified exec session.".to_string(),
+                "Identifier of the running unified exec session. The thread is automatically notified when the process exits; do not poll merely to wait for completion."
+                    .to_string(),
             )),
         ),
         (
             "chars".to_string(),
             JsonSchema::string(Some(
-                "Bytes to write to stdin. Defaults to empty, which polls without writing.".to_string(),
+                "Bytes to write to stdin. Defaults to empty, which performs an explicit synchronous poll without writing; omit the call entirely when automatic wake-on-exit is sufficient."
+                    .to_string(),
             )),
         ),
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
+                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; explicit empty polls wait 5000-300000 ms by default."
+                    .to_string(),
             )),
         ),
         (
@@ -136,12 +139,19 @@ pub fn create_write_stdin_tool() -> ToolSpec {
                 "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.".to_string(),
             )),
         ),
+        (
+            "tail_output_lines".to_string(),
+            JsonSchema::number(Some(
+                "Returns that many lines from the retained terminal transcript without writing or waiting. Use after a wake-on-exit notification when its bounded completion payload is insufficient."
+                    .to_string(),
+            )),
+        ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "write_stdin".to_string(),
         description:
-            "Writes characters to an existing unified exec session and returns recent output."
+            "Interacts with an existing unified exec session or explicitly inspects its output. Running sessions already wake the thread on exit, so do not call this tool merely to wait for completion. Use non-empty chars for interactive input, or tail_output_lines for an immediate non-blocking tail read."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -279,7 +289,7 @@ fn unified_exec_output_schema() -> Value {
             },
             "session_id": {
                 "type": "number",
-                "description": "Session identifier to pass to write_stdin when the process is still running."
+                "description": "Session identifier for a still-running process. Its exit automatically wakes an idle thread or joins the next step of an active turn; use write_stdin only for explicit interaction or inspection."
             },
             "original_token_count": {
                 "type": "number",

@@ -580,6 +580,8 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
                 process_id,
                 cwd: cwd.clone(),
                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
+                initial_exec_command_state: InitialExecCommandState::completed(false),
+                transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
                 hook_command: format!("command-{process_id}"),
                 tty: false,
                 network_approval: None,

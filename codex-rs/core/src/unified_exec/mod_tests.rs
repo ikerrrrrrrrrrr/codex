@@ -138,6 +138,10 @@ async fn exec_command_with_tty(
             process_id,
             cwd: cwd.clone().into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            initial_exec_command_state: process_manager::InitialExecCommandState::completed(false),
+            transcript: Arc::new(tokio::sync::Mutex::new(
+                head_tail_buffer::HeadTailBuffer::default(),
+            )),
             hook_command: cmd.to_string(),
             tty,
             network_approval: None,
@@ -603,6 +607,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
     .await?;
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
+    let wake_state = process_manager::InitialExecCommandState::completed(true);
     manager.process_store.lock().await.processes.insert(
         process_id,
         ProcessEntry {
@@ -611,6 +616,10 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            initial_exec_command_state: Arc::clone(&wake_state),
+            transcript: Arc::new(tokio::sync::Mutex::new(
+                head_tail_buffer::HeadTailBuffer::default(),
+            )),
             hook_command: "sleep 60".to_string(),
             tty: true,
             network_approval: None,
@@ -648,6 +657,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
         .expect("terminate should finish")
         .expect("terminate task should not panic");
     assert!(terminated);
+    assert!(!wake_state.should_wake().await);
     assert!(
         !manager
             .process_store
@@ -684,6 +694,10 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            initial_exec_command_state: process_manager::InitialExecCommandState::completed(false),
+            transcript: Arc::new(tokio::sync::Mutex::new(
+                head_tail_buffer::HeadTailBuffer::default(),
+            )),
             hook_command: "sleep 60".to_string(),
             tty: true,
             network_approval: None,

@@ -430,8 +430,8 @@ impl Session {
 
     /// Starts a regular turn when the session is idle and pending work is waiting.
     ///
-    /// Pending work includes mailbox mail marked with `trigger_turn`, or any mailbox mail while
-    /// an outstanding durable sleep is attached to the thread.
+    /// Pending work includes non-user runtime wakes, mailbox mail marked with `trigger_turn`, or
+    /// any mailbox mail while an outstanding durable sleep is attached to the thread.
     ///
     /// This helper generates a fresh sub-id for the synthetic turn before delegating to the
     /// explicit-sub-id variant.
@@ -447,15 +447,17 @@ impl Session {
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
     /// session.
     ///
-    /// The turn is created only when the session is idle and mailbox mail either requests a turn
-    /// or can wake an outstanding durable sleep.
+    /// The turn is created only when the session is idle and a non-user runtime event is pending,
+    /// or mailbox mail either requests a turn or can wake an outstanding durable sleep.
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_pending_mailbox_items().await
-            || (!self.input_queue.has_trigger_turn_mailbox_items().await
-                && !self.has_outstanding_durable_sleep())
+        let has_non_user_wake = self.input_queue.has_pending_non_user_wakes().await;
+        if !has_non_user_wake
+            && (!self.input_queue.has_pending_mailbox_items().await
+                || (!self.input_queue.has_trigger_turn_mailbox_items().await
+                    && !self.has_outstanding_durable_sleep()))
         {
             return;
         }
@@ -469,6 +471,13 @@ impl Session {
         }
 
         let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
+        if let Some(source) = self.input_queue.pending_wake_source().await {
+            self.send_event(
+                turn_context.as_ref(),
+                EventMsg::WakeUp(codex_protocol::protocol::WakeUpEvent { source }),
+            )
+            .await;
+        }
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
         self.start_task(

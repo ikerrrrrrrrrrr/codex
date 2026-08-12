@@ -1761,6 +1761,7 @@ server_notification_definitions! {
     TurnModerationMetadata => "turn/moderationMetadata" (v2::TurnModerationMetadataNotification),
     ModelSafetyBufferingUpdated => "model/safetyBuffering/updated" (v2::ModelSafetyBufferingUpdatedNotification),
     Warning => "warning" (v2::WarningNotification),
+    ThreadWokeUp => "thread/wokeUp" (v2::ThreadWokeUpNotification),
     GuardianWarning => "guardianWarning" (v2::GuardianWarningNotification),
     DeprecationNotice => "deprecationNotice" (v2::DeprecationNoticeNotification),
     ConfigWarning => "configWarning" (v2::ConfigWarningNotification),

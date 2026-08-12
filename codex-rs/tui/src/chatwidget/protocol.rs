@@ -151,6 +151,14 @@ impl ChatWidget {
                 self.on_model_safety_buffering_updated(notification, replay_kind)
             }
             ServerNotification::Warning(notification) => self.on_warning(notification.message),
+            ServerNotification::ThreadWokeUp(notification) => {
+                let source = match notification.source {
+                    codex_app_server_protocol::ThreadWakeUpSource::Terminal => "terminal",
+                    codex_app_server_protocol::ThreadWakeUpSource::Subagent => "subagent",
+                };
+                self.add_to_history(history_cell::new_wake_up_event(source));
+                self.request_redraw();
+            }
             ServerNotification::GuardianWarning(notification) => {
                 self.on_warning(notification.message)
             }

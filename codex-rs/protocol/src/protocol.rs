@@ -1293,6 +1293,9 @@ pub enum EventMsg {
     /// indicates the turn continued but the user should still be notified.
     Warning(WarningEvent),
 
+    /// An idle thread resumed automatically because runtime work arrived.
+    WakeUp(WakeUpEvent),
+
     /// Warning issued by the guardian automatic approval reviewer.
     GuardianWarning(WarningEvent),
 
@@ -1949,6 +1952,19 @@ impl ErrorEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct WarningEvent {
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WakeUpSource {
+    Terminal,
+    Subagent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct WakeUpEvent {
+    pub source: WakeUpSource,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

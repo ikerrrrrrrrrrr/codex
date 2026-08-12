@@ -187,6 +187,7 @@ Example with notification opt-out:
 - `thread/goal/cleared` — notification emitted whenever a thread goal is removed.
 - `thread/settings/updated` — experimental notification emitted to subscribed clients when a loaded thread’s effective next-turn settings change; includes `threadId` and the full `threadSettings`.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
+- `thread/wokeUp` — transient notification emitted immediately before an automatic turn starts after terminal or subagent work becomes ready; includes `threadId` and `source` (`"terminal"` or `"subagent"`). It is not persisted or replayed when a thread resumes.
 - `thread/archive` — move a thread’s rollout file into the archived directory and attempt to move any spawned descendant thread rollout files; returns `{}` on success and emits `thread/archived` for each archived thread.
 - `thread/delete` — hard-delete an active or archived thread and any spawned descendant threads; returns `{}` on success and emits `thread/deleted` for each deleted thread.
 - `thread/unsubscribe` — unsubscribe this connection from thread turn/item events. If this was the last subscriber, the server keeps the thread loaded and unloads it only after it has had no subscribers and no thread activity for 30 minutes, runs `SessionEnd` hooks, then emits `thread/closed`.

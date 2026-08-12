@@ -26,6 +26,8 @@ struct WriteStdinArgs {
     yield_time_ms: u64,
     #[serde(default)]
     max_output_tokens: Option<usize>,
+    #[serde(default)]
+    tail_output_lines: Option<usize>,
 }
 
 pub struct WriteStdinHandler;
@@ -70,24 +72,37 @@ impl WriteStdinHandler {
         };
 
         let args: WriteStdinArgs = parse_arguments(&arguments)?;
-        let response = session
-            .services
-            .unified_exec_manager
-            .write_stdin(WriteStdinRequest {
-                process_id: args.session_id,
-                input: &args.chars,
-                yield_time_ms: args.yield_time_ms,
-                max_output_tokens: args.max_output_tokens,
-                truncation_policy: turn.model_info.truncation_policy.into(),
-                interaction_event: Some(WriteStdinInteractionEvent {
-                    session: &session,
-                    turn: &turn,
-                }),
-            })
-            .await
-            .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("write_stdin failed: {err}"))
-            })?;
+        if args.tail_output_lines.is_some() && !args.chars.is_empty() {
+            return Err(FunctionCallError::RespondToModel(
+                "tail_output_lines cannot be combined with chars".to_string(),
+            ));
+        }
+        let manager = &session.services.unified_exec_manager;
+        let response = if let Some(line_count) = args.tail_output_lines {
+            manager
+                .tail_terminal_output(
+                    args.session_id,
+                    line_count,
+                    args.max_output_tokens,
+                    turn.model_info.truncation_policy.into(),
+                )
+                .await
+        } else {
+            manager
+                .write_stdin(WriteStdinRequest {
+                    process_id: args.session_id,
+                    input: &args.chars,
+                    yield_time_ms: args.yield_time_ms,
+                    max_output_tokens: args.max_output_tokens,
+                    truncation_policy: turn.model_info.truncation_policy.into(),
+                    interaction_event: Some(WriteStdinInteractionEvent {
+                        session: &session,
+                        turn: &turn,
+                    }),
+                })
+                .await
+        }
+        .map_err(|err| FunctionCallError::RespondToModel(format!("write_stdin failed: {err}")))?;
 
         Ok(boxed_tool_output(response))
     }

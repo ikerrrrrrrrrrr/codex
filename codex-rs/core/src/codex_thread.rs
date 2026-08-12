@@ -518,6 +518,7 @@ impl CodexThread {
     }
 
     /// Records a user-role session-prefix message without creating a new user turn boundary.
+    #[cfg(test)]
     pub(crate) async fn inject_user_message_without_turn(&self, message: String) {
         let item = ResponseItem::Message {
             id: None,
@@ -528,6 +529,26 @@ impl CodexThread {
         };
         self.session
             .inject_no_new_turn(vec![item], /*current_turn_context*/ None)
+            .await;
+    }
+
+    /// Records a runtime-produced user-role message and ensures the parent gets a turn to
+    /// process it. Unlike a signal-only wake, the payload remains durable across active-turn
+    /// races.
+    pub(crate) async fn wake_from_non_user_message(&self, message: String) {
+        let item = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text: message }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        self.session
+            .wake_from_non_user(
+                item,
+                codex_protocol::protocol::WakeUpSource::Subagent,
+                /*origin_turn_context*/ None,
+            )
             .await;
     }
 

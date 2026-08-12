@@ -85,6 +85,10 @@ pub(crate) fn new_warning_event(message: String) -> PrefixedWrappedHistoryCell {
     PrefixedWrappedHistoryCell::new(message.yellow(), "⚠ ".yellow(), "  ")
 }
 
+pub(crate) fn new_wake_up_event(source: &str) -> PrefixedWrappedHistoryCell {
+    PrefixedWrappedHistoryCell::new(format!("Woke up from {source}").dim(), "↳ ".dim(), "  ")
+}
+
 #[derive(Debug)]
 pub(crate) struct SafetyAccessBlockCell {
     body: &'static str,

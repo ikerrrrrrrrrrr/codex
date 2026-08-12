@@ -9,9 +9,31 @@ use crate::tasks::MailboxParentProvenance;
 use crate::tasks::RegularTask;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::WakeUpSource;
 use std::sync::Arc;
 
 impl Session {
+    /// Delivers an event produced by the runtime rather than by the user.
+    ///
+    /// The session queue closes the race between an active turn finishing and an idle turn
+    /// starting. Plan mode records the event but does not autonomously start inference.
+    pub(crate) async fn wake_from_non_user(
+        self: &Arc<Self>,
+        item: ResponseItem,
+        source: WakeUpSource,
+        origin_turn_context: Option<&TurnContext>,
+    ) {
+        if self.collaboration_mode().await.mode == ModeKind::Plan {
+            self.inject_no_new_turn(vec![item], origin_turn_context)
+                .await;
+            return;
+        }
+        self.input_queue
+            .enqueue_non_user_wake(TurnInput::ResponseItem(item), source)
+            .await;
+        self.maybe_start_turn_for_pending_work().await;
+    }
+
     /// Returns the input if there is no active turn to inject into.
     #[expect(
         clippy::await_holding_invalid_type,

@@ -5366,6 +5366,28 @@
       ],
       "type": "object"
     },
+    "ThreadWakeUpSource": {
+      "enum": [
+        "terminal",
+        "subagent"
+      ],
+      "type": "string"
+    },
+    "ThreadWokeUpNotification": {
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/ThreadWakeUpSource"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "TokenUsageBreakdown": {
       "properties": {
         "cacheWriteInputTokens": {
@@ -7093,6 +7115,26 @@
         "params"
       ],
       "title": "WarningNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/wokeUp"
+          ],
+          "title": "Thread/wokeUpNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadWokeUpNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/wokeUpNotification",
       "type": "object"
     },
     {

@@ -2034,7 +2034,7 @@ impl Session {
             parent_agent_path,
             Vec::new(),
             message,
-            /*trigger_turn*/ false,
+            /*trigger_turn*/ true,
         );
         let context =
             AgentCommunicationContext::new(AgentCommunicationKind::Result, self.thread_id);

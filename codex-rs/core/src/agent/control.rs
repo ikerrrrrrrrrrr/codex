@@ -512,7 +512,6 @@ impl AgentControl {
             if !is_final(&status) {
                 return;
             }
-
             let Ok(state) = control.upgrade() else {
                 return;
             };
@@ -546,7 +545,7 @@ impl AgentControl {
                     parent_agent_path,
                     Vec::new(),
                     message,
-                    /*trigger_turn*/ false,
+                    /*trigger_turn*/ true,
                 );
                 let context =
                     AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id);
@@ -564,9 +563,7 @@ impl AgentControl {
             let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
                 return;
             };
-            parent_thread
-                .inject_user_message_without_turn(message)
-                .await;
+            parent_thread.wake_from_non_user_message(message).await;
         });
     }
 

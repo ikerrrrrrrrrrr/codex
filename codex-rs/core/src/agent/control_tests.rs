@@ -2961,7 +2961,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
                 worker_path.clone(),
                 Vec::new(),
                 expected_message.clone(),
-                /*trigger_turn*/ false,
+                /*trigger_turn*/ true,
             ),
         },
     );
@@ -2990,7 +2990,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             AgentPath::root(),
             Vec::new(),
             expected_message,
-            /*trigger_turn*/ false,
+            /*trigger_turn*/ true,
         )
     ));
 }

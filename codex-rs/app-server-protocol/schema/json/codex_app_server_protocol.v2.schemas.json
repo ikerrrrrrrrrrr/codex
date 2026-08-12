@@ -15354,6 +15354,26 @@
           "properties": {
             "method": {
               "enum": [
+                "thread/wokeUp"
+              ],
+              "title": "Thread/wokeUpNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadWokeUpNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/wokeUpNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "guardianWarning"
               ],
               "title": "GuardianWarningNotificationMethod",
@@ -19568,6 +19588,30 @@
         "unsubscribed"
       ],
       "type": "string"
+    },
+    "ThreadWakeUpSource": {
+      "enum": [
+        "terminal",
+        "subagent"
+      ],
+      "type": "string"
+    },
+    "ThreadWokeUpNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/ThreadWakeUpSource"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "threadId"
+      ],
+      "title": "ThreadWokeUpNotification",
+      "type": "object"
     },
     "TokenUsageBreakdown": {
       "properties": {

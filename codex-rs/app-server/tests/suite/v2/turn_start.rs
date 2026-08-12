@@ -51,6 +51,8 @@ use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadWakeUpSource;
+use codex_app_server_protocol::ThreadWokeUpNotification;
 use codex_app_server_protocol::TokenUsageBreakdown;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnEnvironmentParams;
@@ -4315,6 +4317,73 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     )
     .await??;
 
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn background_terminal_completion_emits_thread_woke_up_notification() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let call_id = "uexec-thread-woke-up";
+    let args = serde_json::to_string(&json!({
+        "cmd": "sleep 0.8; printf 'APP-SERVER-WAKE'",
+        "yield_time_ms": 250,
+    }))?;
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        responses::sse(vec![
+            responses::ev_response_created("resp-wake-1"),
+            responses::ev_function_call(call_id, "exec_command", &args),
+            responses::ev_completed("resp-wake-1"),
+        ]),
+        create_final_assistant_message_sse_response("terminal is running")?,
+        create_final_assistant_message_sse_response("terminal completion handled")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_sandbox_mode("danger-full-access")
+        .enable_feature(Feature::UnifiedExec)
+        .write(codex_home.path())?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let ThreadStartResponse { thread, .. } = app_server
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    app_server
+        .request::<TurnStartResponse>(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                client_user_message_id: None,
+                input: vec![V2UserInput::Text {
+                    text: "start a background terminal".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                sandbox_policy: Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let notification: ThreadWokeUpNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app_server.read_notification("thread/wokeUp"),
+    )
+    .await??;
+    assert_eq!(
+        notification,
+        ThreadWokeUpNotification {
+            thread_id: thread.id,
+            source: ThreadWakeUpSource::Terminal,
+        }
+    );
     Ok(())
 }
 

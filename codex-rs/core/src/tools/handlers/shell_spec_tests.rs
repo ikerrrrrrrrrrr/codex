@@ -121,19 +121,29 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "session_id".to_string(),
             JsonSchema::number(Some(
-                "Identifier of the running unified exec session.".to_string(),
+                "Identifier of the running unified exec session. The thread is automatically notified when the process exits; do not poll merely to wait for completion."
+                    .to_string(),
+            )),
+        ),
+        (
+            "tail_output_lines".to_string(),
+            JsonSchema::number(Some(
+                "Returns that many lines from the retained terminal transcript without writing or waiting. Use after a wake-on-exit notification when the included last 100 lines are insufficient."
+                    .to_string(),
             )),
         ),
         (
             "chars".to_string(),
             JsonSchema::string(Some(
-                "Bytes to write to stdin. Defaults to empty, which polls without writing.".to_string(),
+                "Bytes to write to stdin. Defaults to empty, which performs an explicit synchronous poll without writing; omit the call entirely when automatic wake-on-exit is sufficient."
+                    .to_string(),
             )),
         ),
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
+                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; explicit empty polls wait 5000-300000 ms by default."
+                    .to_string(),
             )),
         ),
         (
@@ -149,7 +159,7 @@ fn write_stdin_tool_matches_expected_spec() {
         ToolSpec::Function(ResponsesApiTool {
             name: "write_stdin".to_string(),
             description:
-                "Writes characters to an existing unified exec session and returns recent output."
+                "Interacts with an existing unified exec session or explicitly inspects its output. Running sessions already wake the thread on exit, so do not call this tool merely to wait for completion. Use non-empty chars for interactive input, or tail_output_lines for an immediate non-blocking tail read."
                     .to_string(),
             strict: false,
             defer_loading: None,

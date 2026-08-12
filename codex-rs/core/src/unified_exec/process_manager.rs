@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use tokio::sync::Notify;
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -237,13 +238,61 @@ struct PreparedProcessHandles {
     tty: bool,
 }
 
-struct InitialExecCommandGuard {
+pub(super) struct InitialExecCommandState {
     active: Arc<AtomicBool>,
+    returned_background: AtomicBool,
+    wake_suppressed: AtomicBool,
+    finished: Notify,
+}
+
+impl InitialExecCommandState {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(true)),
+            returned_background: AtomicBool::new(false),
+            wake_suppressed: AtomicBool::new(false),
+            finished: Notify::new(),
+        }
+    }
+
+    fn mark_returned_background(&self) {
+        self.returned_background.store(true, Ordering::Release);
+    }
+
+    pub(super) async fn should_wake(&self) -> bool {
+        let notified = self.finished.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.active.load(Ordering::Acquire) {
+            notified.await;
+        }
+        self.returned_background.load(Ordering::Acquire)
+            && !self.wake_suppressed.load(Ordering::Acquire)
+    }
+
+    fn suppress_wake(&self) {
+        self.wake_suppressed.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn completed(returned_background: bool) -> Arc<Self> {
+        Arc::new(Self {
+            active: Arc::new(AtomicBool::new(false)),
+            returned_background: AtomicBool::new(returned_background),
+            wake_suppressed: AtomicBool::new(false),
+            finished: Notify::new(),
+        })
+    }
+}
+
+struct InitialExecCommandGuard {
+    state: Arc<InitialExecCommandState>,
 }
 
 impl Drop for InitialExecCommandGuard {
     fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
+        self.state.active.store(false, Ordering::Release);
+        self.state.finished.notify_waiters();
     }
 }
 
@@ -395,6 +444,50 @@ fn terminate_process_on_network_denial(
 }
 
 impl UnifiedExecProcessManager {
+    pub(crate) async fn tail_terminal_output(
+        &self,
+        process_id: i32,
+        line_count: usize,
+        max_output_tokens: Option<usize>,
+        truncation_policy: codex_utils_output_truncation::TruncationPolicy,
+    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+        let (transcript, call_id, hook_command, is_running, exit_code) = {
+            let store = self.process_store.lock().await;
+            let entry = store
+                .processes
+                .get(&process_id)
+                .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
+            (
+                Arc::clone(&entry.transcript),
+                entry.call_id.clone(),
+                entry.hook_command.clone(),
+                !entry.process.has_exited(),
+                entry.process.exit_code(),
+            )
+        };
+        let retained = {
+            let transcript = transcript.lock().await;
+            String::from_utf8_lossy(&transcript.to_bytes_with_omission_marker()).into_owned()
+        };
+        let output = crate::unified_exec::tail_output_lines(&retained, line_count);
+        let original_token_count =
+            usize::try_from(approx_tokens_from_byte_count(output.len())).unwrap_or(usize::MAX);
+
+        Ok(ExecCommandToolOutput {
+            event_call_id: call_id,
+            chunk_id: generate_chunk_id(),
+            wall_time: Duration::ZERO,
+            raw_output: output.into_bytes(),
+            truncation_policy,
+            max_output_tokens,
+            process_id: is_running.then_some(process_id),
+            exit_code,
+            original_token_count: Some(original_token_count),
+            output_omitted_bytes: None,
+            hook_command: Some(hook_command),
+        })
+    }
+
     pub(crate) async fn allocate_process_id(&self) -> i32 {
         loop {
             let mut store = self.process_store.lock().await;
@@ -500,7 +593,7 @@ impl UnifiedExecProcessManager {
         // turn cannot drop the last Arc and terminate the background process.
         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
         let _initial_exec_command_guard = if process_started_alive {
-            let initial_exec_command_active = Arc::new(AtomicBool::new(true));
+            let initial_exec_command_state = Arc::new(InitialExecCommandState::new());
             self.store_process(
                 Arc::clone(&process),
                 context,
@@ -514,11 +607,11 @@ impl UnifiedExecProcessManager {
                 deferred_network_approval.clone(),
                 network_denial_monitor,
                 Arc::clone(&transcript),
-                Arc::clone(&initial_exec_command_active),
+                Arc::clone(&initial_exec_command_state),
             )
             .await;
             Some(InitialExecCommandGuard {
-                active: initial_exec_command_active,
+                state: initial_exec_command_state,
             })
         } else {
             None
@@ -695,6 +788,12 @@ impl UnifiedExecProcessManager {
             output_omitted_bytes,
             hook_command: Some(request.hook_command.clone()),
         };
+
+        if response.process_id.is_some()
+            && let Some(guard) = _initial_exec_command_guard.as_ref()
+        {
+            guard.state.mark_returned_background();
+        }
 
         Ok(response)
     }
@@ -954,14 +1053,16 @@ impl UnifiedExecProcessManager {
         network_approval: Option<DeferredNetworkApproval>,
         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
-        initial_exec_command_active: Arc<AtomicBool>,
+        initial_exec_command_state: Arc<InitialExecCommandState>,
     ) {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
             call_id: context.call_id.clone(),
             process_id,
             cwd: cwd.clone(),
-            initial_exec_command_active,
+            initial_exec_command_active: Arc::clone(&initial_exec_command_state.active),
+            initial_exec_command_state: Arc::clone(&initial_exec_command_state),
+            transcript: Arc::clone(&transcript),
             hook_command,
             tty,
             network_approval,
@@ -978,6 +1079,7 @@ impl UnifiedExecProcessManager {
         // network-approval cleanup only after dropping that lock.
         if let Some(pruned_entry) = pruned_entry {
             unregister_network_approval_for_entry(&pruned_entry).await;
+            pruned_entry.initial_exec_command_state.suppress_wake();
             pruned_entry.process.terminate();
         }
 
@@ -993,6 +1095,7 @@ impl UnifiedExecProcessManager {
             transcript,
             started_at,
             network_denial_monitor,
+            initial_exec_command_state,
         );
     }
 
@@ -1474,6 +1577,7 @@ impl UnifiedExecProcessManager {
 
         for entry in entries {
             unregister_network_approval_for_entry(&entry).await;
+            entry.initial_exec_command_state.suppress_wake();
             entry.process.terminate();
         }
     }
@@ -1503,6 +1607,7 @@ impl UnifiedExecProcessManager {
             let Some(entry) = store.processes.get(&process_id) else {
                 return false;
             };
+            entry.initial_exec_command_state.suppress_wake();
             (Arc::clone(&entry.process), entry.process.has_exited())
         };
 

@@ -839,8 +839,15 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         _ => None,
     })
     .await;
+    let internal_thread_id = internal_thread.thread_id.to_string();
     let requests = wait_for_requests(&internal_request).await?;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.header("thread-id").as_deref() == Some(&internal_thread_id))
+            .count(),
+        1
+    );
 
     let subagent_stop_inputs_after_internal =
         read_hook_log(test.codex_home_path(), "subagent_stop_hook_log.jsonl")?;
@@ -875,6 +882,88 @@ async fn subagent_notification_is_included_without_wait() -> Result<()> {
     let turn2_requests = wait_for_requests(&turn2).await?;
     assert!(turn2_requests.iter().any(has_subagent_notification));
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_subagent_wakes_an_idle_parent_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+    }))?;
+    let spawn_request = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-parent-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V1_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
+            ev_completed("resp-parent-spawn"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-parent-done"),
+            ev_assistant_message("msg-parent-done", "parent yielded"),
+            ev_completed("resp-parent-done"),
+        ]),
+    )
+    .await;
+    mount_response_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        sse_response(sse(vec![
+            ev_response_created("resp-child-done"),
+            ev_assistant_message("msg-child-done", "child wake result"),
+            ev_completed("resp-child-done"),
+        ]))
+        .set_delay(Duration::from_millis(600)),
+    )
+    .await;
+    let wake_request = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, "<subagent_notification>"),
+        sse(vec![
+            ev_response_created("resp-parent-wake"),
+            ev_assistant_message("msg-parent-wake", "parent resumed"),
+            ev_completed("resp-parent-wake"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should allow feature update");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn(TURN_1_PROMPT).await?;
+
+    let requests = wait_for_requests(&wake_request).await?;
+    assert_eq!(requests.len(), 1);
+    assert!(has_subagent_notification(&requests[0]));
+    let spawn_requests = wait_for_requests(&spawn_request).await?;
+    let spawn_body = spawn_requests[0].body_json();
+    let wake_body = requests[0].body_json();
+    let spawn_turn_id = spawn_body["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("spawn request should have a turn id");
+    let wake_turn_id = wake_body["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("wake request should have a turn id");
+    assert_ne!(wake_turn_id, spawn_turn_id);
     Ok(())
 }
 
@@ -1715,7 +1804,7 @@ enum CompletionScenario {
 #[test_case(CompletionScenario::Completed ; "completed")]
 #[test_case(CompletionScenario::TerminalError ; "terminal_error")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plaintext_multi_agent_v2_completion_sends_agent_message(
+async fn plaintext_multi_agent_v2_completion_wakes_parent(
     scenario: CompletionScenario,
 ) -> Result<()> {
     let server = start_mock_server().await;
@@ -1777,37 +1866,15 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
     let notification = format!(
         "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n{payload}"
     );
-    // If the child is still running when the parent turn starts, wait_agent blocks
-    // until mailbox delivery. The follow-up request must then contain that delivery.
-    mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| {
-            body_contains(req, TURN_2_NO_WAIT_PROMPT)
-                && !body_contains(req, "Message Type: FINAL_ANSWER")
-        },
-        sse(vec![
-            ev_response_created("resp-parent-3"),
-            ev_function_call_with_namespace(
-                "wait-agent-call",
-                MULTI_AGENT_V2_NAMESPACE,
-                "wait_agent",
-                "{}",
-            ),
-            ev_completed("resp-parent-3"),
-        ]),
-    )
-    .await;
     let agent_request = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, TURN_2_NO_WAIT_PROMPT)
-                && body_contains(req, "Message Type: FINAL_ANSWER")
-                && body_contains(req, expected_text)
+            body_contains(req, "Message Type: FINAL_ANSWER") && body_contains(req, expected_text)
         },
         sse(vec![
-            ev_response_created("resp-parent-4"),
-            ev_assistant_message("msg-parent-4", "done"),
-            ev_completed("resp-parent-4"),
+            ev_response_created("resp-parent-3"),
+            ev_assistant_message("msg-parent-3", "done"),
+            ev_completed("resp-parent-3"),
         ]),
     )
     .await;
@@ -1831,7 +1898,6 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
 
     test.submit_turn(TURN_1_PROMPT).await?;
     let _ = wait_for_requests(&child_request).await?;
-    test.submit_turn(TURN_2_NO_WAIT_PROMPT).await?;
 
     let request = wait_for_requests(&agent_request)
         .await?

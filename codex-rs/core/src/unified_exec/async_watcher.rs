@@ -11,6 +11,9 @@ use tokio::time::Sleep;
 use super::UnifiedExecContext;
 use super::process::OutputHandles;
 use super::process::UnifiedExecProcess;
+use super::process_manager::InitialExecCommandState;
+use crate::context::BackgroundTerminalCompletion;
+use crate::context::ContextualUserFragment;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -26,6 +29,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExecOutputStream;
+use codex_protocol::protocol::WakeUpSource;
 use codex_utils_path_uri::PathUri;
 
 pub(crate) const TRAILING_OUTPUT_GRACE: Duration = Duration::from_millis(100);
@@ -168,6 +172,7 @@ pub(crate) fn spawn_exit_watcher(
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
     network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+    initial_exec_command_state: Arc<InitialExecCommandState>,
 ) {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
@@ -185,37 +190,60 @@ pub(crate) fn spawn_exit_watcher(
         let _interaction_guard = interaction_lock.lock_owned().await;
 
         let duration = Instant::now().saturating_duration_since(started_at);
-        if let Some(message) = process.failure_message() {
+        let (exit_code, aggregated_output) = if let Some(message) = process.failure_message() {
+            let stdout = resolve_aggregated_output(&transcript, String::new()).await;
+            let aggregated_output = if stdout.is_empty() {
+                message.clone()
+            } else {
+                format!("{stdout}\n{message}")
+            };
             emit_failed_exec_end_for_unified_exec(
-                session_ref,
-                turn_ref,
+                Arc::clone(&session_ref),
+                Arc::clone(&turn_ref),
                 call_id,
-                command,
-                cwd,
+                command.clone(),
+                cwd.clone(),
                 Some(process_id.to_string()),
                 plugin_attribution,
-                transcript,
+                Arc::clone(&transcript),
                 String::new(),
                 message,
                 duration,
             )
             .await;
+            (-1, aggregated_output)
         } else {
             let exit_code = process.exit_code().unwrap_or(-1);
+            let aggregated_output = resolve_aggregated_output(&transcript, String::new()).await;
             emit_exec_end_for_unified_exec(
-                session_ref,
-                turn_ref,
+                Arc::clone(&session_ref),
+                Arc::clone(&turn_ref),
                 call_id,
-                command,
-                cwd,
+                command.clone(),
+                cwd.clone(),
                 Some(process_id.to_string()),
                 plugin_attribution,
-                transcript,
+                Arc::clone(&transcript),
                 String::new(),
                 exit_code,
                 duration,
             )
             .await;
+            (exit_code, aggregated_output)
+        };
+
+        if initial_exec_command_state.should_wake().await {
+            let item = ContextualUserFragment::into(BackgroundTerminalCompletion::new(
+                process_id,
+                command,
+                cwd,
+                exit_code,
+                duration,
+                aggregated_output,
+            ));
+            session_ref
+                .wake_from_non_user(item, WakeUpSource::Terminal, Some(turn_ref.as_ref()))
+                .await;
         }
     });
 }
