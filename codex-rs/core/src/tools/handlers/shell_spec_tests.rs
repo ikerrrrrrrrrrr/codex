@@ -22,11 +22,11 @@ fn exec_command_tool_matches_expected_spec() {
 
     let description = if cfg!(windows) {
         format!(
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.{}",
+            "Runs a command in a managed terminal. If it remains running, the session continues in the background and wakes the thread when it exits.{}",
             windows_shell_guidance_description()
         )
     } else {
-        "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+        "Runs a command in a managed terminal. If it remains running, the session continues in the background and wakes the thread when it exits."
             .to_string()
     };
     let yield_time_ms_description = if cfg!(windows) {
@@ -121,21 +121,21 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "session_id".to_string(),
             JsonSchema::number(Some(
-                "Identifier of the running unified exec session. The thread is automatically notified when the process exits; do not poll merely to wait for completion."
+                "Identifier of the managed terminal session. Its exit automatically wakes the thread."
                     .to_string(),
             )),
         ),
         (
             "tail_output_lines".to_string(),
             JsonSchema::number(Some(
-                "Returns that many lines from the retained terminal transcript without writing or waiting. Use after a wake-on-exit notification when the included last 100 lines are insufficient."
+                "Returns that many retained output lines immediately without consuming them or affecting completion wakeup."
                     .to_string(),
             )),
         ),
         (
             "chars".to_string(),
             JsonSchema::string(Some(
-                "Bytes to write to stdin. Defaults to empty, which performs an explicit synchronous poll without writing; omit the call entirely when automatic wake-on-exit is sufficient."
+                "Bytes to write to stdin. Empty input waits for output without writing."
                     .to_string(),
             )),
         ),
@@ -159,7 +159,7 @@ fn write_stdin_tool_matches_expected_spec() {
         ToolSpec::Function(ResponsesApiTool {
             name: "write_stdin".to_string(),
             description:
-                "Interacts with an existing unified exec session or explicitly inspects its output. Running sessions already wake the thread on exit, so do not call this tool merely to wait for completion. Use non-empty chars for interactive input, or tail_output_lines for an immediate non-blocking tail read."
+                "Sends interactive input or returns output from a managed terminal session, including an immediate non-consuming tail."
                     .to_string(),
             strict: false,
             defer_loading: None,
