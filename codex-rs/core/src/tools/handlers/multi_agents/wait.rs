@@ -1,20 +1,8 @@
 use super::*;
-use crate::agent::status::is_final;
-use crate::session::session::Session;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
-use codex_protocol::error::CodexErrorDetails;
 use codex_tools::ToolSpec;
-use futures::FutureExt;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::watch::Receiver;
-use tokio::time::Instant;
-
-use tokio::time::timeout_at;
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -38,7 +26,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
 
     fn search_info(&self) -> Option<ToolSearchInfo> {
         multi_agent_tool_search_info(
-            "wait_agent wait agent subagent status final result complete timeout targets",
+            "wait_agent inspect agent subagent current status result targets",
             self.spec(),
         )
     }
@@ -86,15 +74,7 @@ impl Handler {
             });
         }
 
-        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
-        let timeout_ms = match timeout_ms {
-            ms if ms <= 0 => {
-                return Err(FunctionCallError::RespondToModel(
-                    "timeout_ms must be greater than zero".to_owned(),
-                ));
-            }
-            ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
-        };
+        let _ = args.timeout_ms;
 
         session
             .emit_turn_item_started(
@@ -114,90 +94,21 @@ impl Handler {
             )
             .await;
 
-        let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
-        let mut initial_final_statuses = Vec::new();
+        let mut statuses_by_id = HashMap::with_capacity(receiver_thread_ids.len());
         for id in &receiver_thread_ids {
-            match session.services.agent_control.subscribe_status(*id).await {
-                Ok(rx) => {
-                    let status = rx.borrow().clone();
-                    if is_final(&status) {
-                        initial_final_statuses.push((*id, status));
-                    }
-                    status_rxs.push((*id, rx));
-                }
-                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
-                    initial_final_statuses.push((*id, AgentStatus::NotFound));
-                }
-                Err(err) => {
-                    let mut statuses = HashMap::with_capacity(1);
-                    statuses.insert(*id, session.services.agent_control.get_status(*id).await);
-                    session
-                        .emit_turn_item_completed(
-                            &turn,
-                            TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
-                                id: call_id.clone(),
-                                tool: CollabAgentTool::Wait,
-                                status: wait_tool_call_status(&statuses),
-                                sender_thread_id: session.thread_id,
-                                receiver_thread_ids: statuses.keys().copied().collect(),
-                                receiver_agents: wait_receiver_agents(&statuses, &receiver_agents),
-                                prompt: None,
-                                model: None,
-                                reasoning_effort: None,
-                                agents_states: statuses,
-                            }),
-                        )
-                        .await;
-                    return Err(collab_agent_error(*id, err));
-                }
-            }
+            statuses_by_id.insert(*id, session.services.agent_control.get_status(*id).await);
         }
-
-        let statuses = if !initial_final_statuses.is_empty() {
-            initial_final_statuses
-        } else {
-            let mut futures = FuturesUnordered::new();
-            for (id, rx) in status_rxs.into_iter() {
-                let session = session.clone();
-                futures.push(wait_for_final_status(session, id, rx));
-            }
-            let mut results = Vec::new();
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            loop {
-                match timeout_at(deadline, futures.next()).await {
-                    Ok(Some(Some(result))) => {
-                        results.push(result);
-                        break;
-                    }
-                    Ok(Some(None)) => continue,
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            if !results.is_empty() {
-                loop {
-                    match futures.next().now_or_never() {
-                        Some(Some(Some(result))) => results.push(result),
-                        Some(Some(None)) => continue,
-                        Some(None) | None => break,
-                    }
-                }
-            }
-            results
-        };
-
-        let timed_out = statuses.is_empty();
-        let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
         let result = WaitAgentResult {
-            status: statuses
-                .into_iter()
+            status: statuses_by_id
+                .iter()
                 .filter_map(|(thread_id, status)| {
                     target_by_thread_id
-                        .get(&thread_id)
+                        .get(thread_id)
                         .cloned()
-                        .map(|target| (target, status))
+                        .map(|target| (target, status.clone()))
                 })
                 .collect(),
-            timed_out,
+            timed_out: false,
         };
 
         session
@@ -298,27 +209,5 @@ impl ToolOutput for WaitAgentResult {
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
         tool_output_code_mode_result(self, "wait_agent")
-    }
-}
-
-async fn wait_for_final_status(
-    session: Arc<Session>,
-    thread_id: ThreadId,
-    mut status_rx: Receiver<AgentStatus>,
-) -> Option<(ThreadId, AgentStatus)> {
-    let mut status = status_rx.borrow().clone();
-    if is_final(&status) {
-        return Some((thread_id, status));
-    }
-
-    loop {
-        if status_rx.changed().await.is_err() {
-            let latest = session.services.agent_control.get_status(thread_id).await;
-            return is_final(&latest).then_some((thread_id, latest));
-        }
-        status = status_rx.borrow().clone();
-        if is_final(&status) {
-            return Some((thread_id, status));
-        }
     }
 }

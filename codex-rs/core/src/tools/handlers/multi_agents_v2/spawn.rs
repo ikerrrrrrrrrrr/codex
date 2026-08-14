@@ -119,6 +119,7 @@ async fn handle_spawn_agent(
         new_agent_path.clone(),
         message,
         &source,
+        InterAgentMessageType::NewTask,
         /*trigger_turn*/ true,
     );
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);

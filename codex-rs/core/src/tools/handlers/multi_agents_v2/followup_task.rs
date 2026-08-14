@@ -30,7 +30,7 @@ impl Handler {
         let args: FollowupTaskArgs = parse_arguments(&arguments)?;
         handle_message_string_tool(
             invocation,
-            MessageDeliveryMode::TriggerTurn,
+            MessageDeliveryMode::Followup,
             args.target,
             args.message,
         )

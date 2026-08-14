@@ -59,6 +59,7 @@ fn communication_from_tool_message(
     recipient: AgentPath,
     message: String,
     source: &crate::tools::context::ToolCallSource,
+    message_type: InterAgentMessageType,
     trigger_turn: bool,
 ) -> InterAgentCommunication {
     if !matches!(
@@ -73,11 +74,6 @@ fn communication_from_tool_message(
             trigger_turn,
         );
     }
-    let message_type = if trigger_turn {
-        InterAgentMessageType::NewTask
-    } else {
-        InterAgentMessageType::Message
-    };
     let content =
         InterAgentMessage::new(message_type, recipient.clone(), author.clone(), message).render();
     InterAgentCommunication::new(author, recipient, Vec::new(), content, trigger_turn)

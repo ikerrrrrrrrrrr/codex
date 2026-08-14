@@ -73,6 +73,12 @@ pub(crate) const UNIFIED_EXEC_OUTPUT_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 pub(crate) const UNIFIED_EXEC_OUTPUT_MAX_TOKENS: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES / 4;
 pub(crate) const MAX_UNIFIED_EXEC_PROCESSES: usize = 64;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalCompletionDelivery {
+    Silent,
+    WakeThread,
+}
+
 pub(crate) struct UnifiedExecContext {
     pub session: Arc<Session>,
     pub step_context: Arc<StepContext>,
@@ -108,6 +114,7 @@ pub(crate) struct ExecCommandRequest {
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
     pub prefix_rule: Option<Vec<String>>,
+    pub completion_delivery: TerminalCompletionDelivery,
 }
 
 #[derive(Debug)]

@@ -153,7 +153,6 @@ impl ChatWidget {
         self.transcript.plan_delta_buffer.push_str(&delta);
         if self.plan_stream_controller.is_none() {
             // Before starting a plan stream, flush any active exec cell group.
-            self.flush_unified_exec_wait_streak();
             self.flush_active_cell();
             self.plan_stream_controller = Some(PlanStreamController::new(
                 self.current_stream_width(/*reserved_cols*/ 4),
@@ -233,11 +232,6 @@ impl ChatWidget {
         self.reasoning_buffer.push_str(&delta);
 
         if self.safety_buffering_is_waiting() {
-            return;
-        }
-
-        if self.unified_exec_wait_streak.is_some() {
-            // Unified exec waiting should take precedence over reasoning-derived status headers.
             return;
         }
 
@@ -445,7 +439,6 @@ impl ChatWidget {
         }
         if self.stream_controller.is_none() {
             // Before starting an agent stream, flush any active exec cell group.
-            self.flush_unified_exec_wait_streak();
             self.flush_active_cell();
             // If the previous turn inserted non-stream history (exec output, patch status, MCP
             // calls), render a separator before starting the next streamed assistant message.

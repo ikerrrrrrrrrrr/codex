@@ -899,16 +899,10 @@ impl ChatWidget {
             TerminalTitleStatusKind::Working if !self.bottom_pane.is_task_running() => {
                 "Ready".to_string()
             }
-            TerminalTitleStatusKind::WaitingForBackgroundTerminal
-                if !self.bottom_pane.is_task_running() =>
-            {
-                "Ready".to_string()
-            }
             TerminalTitleStatusKind::Thinking if !self.bottom_pane.is_task_running() => {
                 "Ready".to_string()
             }
             TerminalTitleStatusKind::Working => "Working".to_string(),
-            TerminalTitleStatusKind::WaitingForBackgroundTerminal => "Waiting".to_string(),
             TerminalTitleStatusKind::Thinking => "Thinking".to_string(),
         }
     }

@@ -435,42 +435,40 @@ async fn wait_for_sleep_item_completed(codex: &CodexThread, call_id: &str, durat
     );
 }
 
-struct SleepingRootExtension;
-
-impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config>
-    for SleepingRootExtension
-{
-    fn on_thread_start<'a>(
-        &'a self,
-        input: codex_extension_api::ThreadStartInput<'a, codex_core::config::Config>,
-    ) -> codex_extension_api::ExtensionFuture<'a, ()> {
-        Box::pin(async move {
-            input.thread_store.insert(SleepItem {
-                id: "clock-wait-1".to_string(),
-                duration_ms: 60_000,
-            });
-        })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queue_only_agent_mail_wakes_sleeping_root_and_persists_message() {
+async fn agent_message_wakes_idle_root_and_persists_message() {
     const CHILD_MESSAGE: &str = "worker completed";
 
     let (server, _completions) =
         start_streaming_sse_server(vec![response_completed_chunks("resp-1")]).await;
-    let mut extensions =
-        codex_extension_api::ExtensionRegistryBuilder::<codex_core::config::Config>::new();
-    extensions.thread_lifecycle_contributor(Arc::new(SleepingRootExtension));
     let codex = test_codex()
         .with_model("gpt-5.4")
-        .with_extensions(Arc::new(extensions.build()))
         .build_with_streaming_server(&server)
         .await
         .expect("build Codex test session")
         .codex;
 
-    enqueue_queue_only_agent_mail(&codex, CHILD_MESSAGE).await;
+    codex
+        .submit(Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                AgentPath::try_from("/root/worker").expect("worker path should parse"),
+                AgentPath::root(),
+                Vec::new(),
+                CHILD_MESSAGE.to_string(),
+                /*trigger_turn*/ true,
+            ),
+        })
+        .await
+        .expect("submit agent message");
+    let EventMsg::WakeUp(wake) =
+        wait_for_event(&codex, |event| matches!(event, EventMsg::WakeUp(_))).await
+    else {
+        unreachable!("wait predicate only accepts wake events");
+    };
+    assert_eq!(
+        wake.source,
+        codex_protocol::protocol::WakeUpSource::Subagent
+    );
     wait_for_turn_complete(&codex).await;
 
     assert_eq!(server.requests().await.len(), 1);
@@ -493,70 +491,6 @@ async fn queue_only_agent_mail_wakes_sleeping_root_and_persists_message() {
                 )
         )
     }));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
-    const WAIT_CALL_ID: &str = "wait-call";
-    const INITIAL_PROMPT: &str = "wait for an agent";
-    const STEER_PROMPT: &str = "stop waiting and continue";
-    const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
-
-    let first_chunks = vec![
-        chunk(ev_response_created("resp-1")),
-        chunk(ev_function_call_with_namespace(
-            WAIT_CALL_ID,
-            MULTI_AGENT_V2_NAMESPACE,
-            "wait_agent",
-            r#"{"timeout_ms":10000}"#,
-        )),
-        chunk(ev_completed("resp-1")),
-    ];
-    let (server, _completions) =
-        start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
-    let codex = test_codex()
-        .with_model("gpt-5.4")
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::MultiAgentV2)
-                .expect("test config should allow feature update");
-        })
-        .build_with_streaming_server(&server)
-        .await
-        .expect("build Codex test session")
-        .codex;
-
-    submit_user_input(&codex, INITIAL_PROMPT).await;
-    wait_for_event(&codex, |event| {
-        matches!(event, EventMsg::CollabWaitingBegin(_))
-    })
-    .await;
-
-    steer_user_input(&codex, STEER_PROMPT).await;
-    wait_for_turn_complete(&codex).await;
-
-    let requests = server.requests().await;
-    assert_eq!(requests.len(), 2);
-    let second: Value = from_slice(&requests[1]).expect("parse second request");
-    let relevant_user_input = message_input_texts(&second, "user")
-        .into_iter()
-        .filter(|text| text == INITIAL_PROMPT || text == STEER_PROMPT)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        relevant_user_input,
-        vec![INITIAL_PROMPT.to_string(), STEER_PROMPT.to_string()]
-    );
-    let wait_output = function_call_output_text(&second, WAIT_CALL_ID).expect("wait_agent output");
-    assert_eq!(
-        serde_json::from_str::<Value>(wait_output).expect("parse wait_agent output"),
-        json!({
-            "message": "Wait interrupted by new input.",
-            "timed_out": false,
-        })
-    );
-
-    server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

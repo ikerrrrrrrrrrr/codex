@@ -44,6 +44,7 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::unified_exec::MIN_YIELD_TIME_MS;
 use crate::unified_exec::ProcessEntry;
 use crate::unified_exec::ProcessStore;
+use crate::unified_exec::TerminalCompletionDelivery;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcessManager;
@@ -242,15 +243,17 @@ pub(super) struct InitialExecCommandState {
     active: Arc<AtomicBool>,
     returned_background: AtomicBool,
     wake_suppressed: AtomicBool,
+    completion_delivery: TerminalCompletionDelivery,
     finished: Notify,
 }
 
 impl InitialExecCommandState {
-    fn new() -> Self {
+    fn new(completion_delivery: TerminalCompletionDelivery) -> Self {
         Self {
             active: Arc::new(AtomicBool::new(true)),
             returned_background: AtomicBool::new(false),
             wake_suppressed: AtomicBool::new(false),
+            completion_delivery,
             finished: Notify::new(),
         }
     }
@@ -268,6 +271,7 @@ impl InitialExecCommandState {
         }
         self.returned_background.load(Ordering::Acquire)
             && !self.wake_suppressed.load(Ordering::Acquire)
+            && self.completion_delivery == TerminalCompletionDelivery::WakeThread
     }
 
     fn suppress_wake(&self) {
@@ -280,6 +284,21 @@ impl InitialExecCommandState {
             active: Arc::new(AtomicBool::new(false)),
             returned_background: AtomicBool::new(returned_background),
             wake_suppressed: AtomicBool::new(false),
+            completion_delivery: TerminalCompletionDelivery::WakeThread,
+            finished: Notify::new(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn completed_with_delivery(
+        returned_background: bool,
+        completion_delivery: TerminalCompletionDelivery,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            active: Arc::new(AtomicBool::new(false)),
+            returned_background: AtomicBool::new(returned_background),
+            wake_suppressed: AtomicBool::new(false),
+            completion_delivery,
             finished: Notify::new(),
         })
     }
@@ -593,7 +612,8 @@ impl UnifiedExecProcessManager {
         // turn cannot drop the last Arc and terminate the background process.
         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
         let _initial_exec_command_guard = if process_started_alive {
-            let initial_exec_command_state = Arc::new(InitialExecCommandState::new());
+            let initial_exec_command_state =
+                Arc::new(InitialExecCommandState::new(request.completion_delivery));
             self.store_process(
                 Arc::clone(&process),
                 context,
@@ -1337,7 +1357,10 @@ impl UnifiedExecProcessManager {
             session: context.session.clone(),
             step_context: Arc::clone(&context.step_context),
             call_id: context.call_id.clone(),
-            tool_name: ToolName::plain("exec_command"),
+            tool_name: ToolName::plain(match request.completion_delivery {
+                TerminalCompletionDelivery::Silent => "exec_command",
+                TerminalCompletionDelivery::WakeThread => "exec_background",
+            }),
         };
         orchestrator
             .run(&mut runtime, &req, &tool_ctx, turn, turn.approval_policy())

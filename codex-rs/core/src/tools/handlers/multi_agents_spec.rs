@@ -202,7 +202,7 @@ pub fn create_send_message_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "send_message".to_string(),
-        description: "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
+        description: "Send a message to an existing agent. The message wakes an idle recipient or joins the recipient's active turn at the next safe boundary."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -272,7 +272,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "wait_agent".to_string(),
-            description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+            description: "Return the current status of the requested agents immediately. Agent messages and final statuses automatically wake the parent thread."
                 .to_string(),
             strict: false,
             defer_loading: None,
@@ -285,7 +285,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
+        description: "Return whether agent or user updates are currently queued. Agent messages and final statuses automatically wake the parent thread."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -498,12 +498,12 @@ fn wait_output_schema_v1() -> Value {
         "properties": {
             "status": {
                 "type": "object",
-                "description": "Final statuses keyed by agent id.",
+                "description": "Current statuses keyed by agent id.",
                 "additionalProperties": agent_status_output_schema()
             },
             "timed_out": {
                 "type": "boolean",
-                "description": "Whether the wait call returned due to timeout before any agent reached a final status."
+                "description": "Compatibility field that is always false for an immediate status snapshot."
             }
         },
         "required": ["status", "timed_out"],
@@ -517,11 +517,11 @@ fn wait_output_schema_v2() -> Value {
         "properties": {
             "message": {
                 "type": "string",
-                "description": "Brief wait summary without the agent's final content, including any timeout adjustment."
+                "description": "Brief summary of currently queued activity without message content."
             },
             "timed_out": {
                 "type": "boolean",
-                "description": "Whether the wait call returned because no mailbox update arrived before the timeout."
+                "description": "Compatibility field that is always false for an immediate activity snapshot."
             }
         },
         "required": ["message", "timed_out"],
@@ -732,10 +732,9 @@ Requests for depth, thoroughness, research, investigation, or detailed codebase 
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 
 ### After you delegate
-- Call wait_agent very sparingly. Only call wait_agent when you need the result immediately for the next critical-path step and you are blocked until it returns.
+- Agent messages and final results are delivered automatically. Use wait_agent only for an immediate status snapshot.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
-- Do not repeatedly wait by reflex.
 - When a delegated coding task returns, quickly review the uploaded changes, then integrate or refine them.
 
 ### Parallel delegation patterns
@@ -845,26 +844,14 @@ fn spawn_agent_models_description(
     )
 }
 
-fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema {
-    let properties = BTreeMap::from([
-        (
-            "targets".to_string(),
-            JsonSchema::array(
-                JsonSchema::string(/*description*/ None),
-                Some(
-                    "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first."
-                        .to_string(),
-                ),
-            ),
+fn wait_agent_tool_parameters_v1(_options: WaitAgentTimeoutOptions) -> JsonSchema {
+    let properties = BTreeMap::from([(
+        "targets".to_string(),
+        JsonSchema::array(
+            JsonSchema::string(/*description*/ None),
+            Some("Agent ids whose current status should be returned.".to_string()),
         ),
-        (
-            "timeout_ms".to_string(),
-            JsonSchema::number(Some(format!(
-                "Timeout in milliseconds. Defaults to {}, min {}, max {}. Prefer longer waits (minutes) to avoid busy polling.",
-                options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
-            ))),
-        ),
-    ]);
+    )]);
 
     JsonSchema::object(
         properties,
@@ -873,16 +860,8 @@ fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema
     )
 }
 
-fn wait_agent_tool_parameters_v2(options: WaitAgentTimeoutOptions) -> JsonSchema {
-    let properties = BTreeMap::from([(
-        "timeout_ms".to_string(),
-        JsonSchema::number(Some(format!(
-            "Timeout in milliseconds. Defaults to {}, min {}, max {}.",
-            options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
-        ))),
-    )]);
-
-    JsonSchema::object(properties, /*required*/ None, Some(false.into()))
+fn wait_agent_tool_parameters_v2(_options: WaitAgentTimeoutOptions) -> JsonSchema {
+    JsonSchema::object(BTreeMap::new(), /*required*/ None, Some(false.into()))
 }
 
 #[cfg(test)]

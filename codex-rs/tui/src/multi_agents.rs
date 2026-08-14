@@ -385,12 +385,12 @@ fn waiting_begin(
 
     let title = match receiver_agents.as_slice() {
         [(thread_id, metadata)] => title_with_agent(
-            "Waiting for",
+            "Checking",
             agent_label(*thread_id, metadata),
             /*spawn_request*/ None,
         ),
-        [] => title_text("Waiting for agents"),
-        _ => title_text(format!("Waiting for {} agents", receiver_agents.len())),
+        [] => title_text("Checking agent updates"),
+        _ => title_text(format!("Checking {} agents", receiver_agents.len())),
     };
 
     let details = if receiver_agents.len() > 1 {
@@ -411,7 +411,7 @@ fn waiting_end(
     agent_metadata: &mut impl FnMut(ThreadId) -> AgentMetadata,
 ) -> PlainHistoryCell {
     let details = wait_complete_lines(receiver_thread_ids, agents_states, agent_metadata);
-    collab_event(title_text("Finished waiting"), details)
+    collab_event(title_text("Checked agent status"), details)
 }
 
 fn close_end(
@@ -587,7 +587,7 @@ fn wait_complete_lines(
     entries.extend(extras);
 
     if entries.is_empty() {
-        vec![Line::from(Span::from("No agents completed yet"))]
+        vec![Line::from(Span::from("No agent updates queued"))]
     } else {
         entries
             .into_iter()

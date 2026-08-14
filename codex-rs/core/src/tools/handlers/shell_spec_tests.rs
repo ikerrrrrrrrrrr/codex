@@ -22,15 +22,15 @@ fn exec_command_tool_matches_expected_spec() {
 
     let description = if cfg!(windows) {
         format!(
-            "Runs a command in a managed terminal. If it remains running, the session continues in the background and wakes the thread when it exits.{}",
+            "Runs a command in a managed terminal. If it remains running after the initial yield, it stays inspectable by session ID; completion does not wake the thread.{}",
             windows_shell_guidance_description()
         )
     } else {
-        "Runs a command in a managed terminal. If it remains running, the session continues in the background and wakes the thread when it exits."
+        "Runs a command in a managed terminal. If it remains running after the initial yield, it stays inspectable by session ID; completion does not wake the thread."
             .to_string()
     };
     let yield_time_ms_description = if cfg!(windows) {
-        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
+        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. Defaults to 10000 ms; effective range on Windows is 10000-30000 ms."
     } else {
         "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
     };
@@ -93,8 +93,36 @@ fn exec_command_tool_matches_expected_spec() {
                 Some(vec!["cmd".to_string()]),
                 Some(false.into())
             ),
-            output_schema: Some(unified_exec_output_schema()),
+            output_schema: Some(unified_exec_output_schema(
+                "Session identifier for a still-running process. Completion does not wake the thread; use write_stdin for explicit interaction or inspection."
+            )),
         })
+    );
+}
+
+#[test]
+fn exec_background_tool_exposes_wake_on_completion() {
+    let ToolSpec::Function(tool) = create_exec_background_tool_with_environment_id(
+        CommandToolOptions {
+            allow_login_shell: false,
+            exec_permission_approvals_enabled: false,
+        },
+        /*include_environment_id*/ false,
+        /*include_shell_parameter*/ true,
+    ) else {
+        panic!("exec_background should be a function tool");
+    };
+
+    assert_eq!(tool.name, "exec_background");
+    assert!(tool.description.contains("completion wakes the thread"));
+    let value = serde_json::to_value(&tool).expect("tool spec should serialize");
+    assert_eq!(
+        value.pointer("/parameters/properties/yield_time_ms/description"),
+        Some(&serde_json::json!(if cfg!(windows) {
+            "Initial output window before returning the background session ID. Defaults to 1000 ms; effective range on Windows is 10000-30000 ms."
+        } else {
+            "Initial output window before returning the background session ID. Defaults to 1000 ms; effective range is 250-30000 ms."
+        }))
     );
 }
 
@@ -121,7 +149,7 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "session_id".to_string(),
             JsonSchema::number(Some(
-                "Identifier of the managed terminal session. Its exit automatically wakes the thread."
+                "Identifier of the managed terminal session. Completion behavior is determined by the tool that started it."
                     .to_string(),
             )),
         ),
@@ -135,14 +163,14 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "chars".to_string(),
             JsonSchema::string(Some(
-                "Bytes to write to stdin. Empty input waits for output without writing."
+                "Bytes to write to stdin. Empty or omitted input returns an immediate non-consuming output snapshot."
                     .to_string(),
             )),
         ),
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; explicit empty polls wait 5000-300000 ms by default."
+                "Wait before yielding output after writing non-empty input. Defaults to 250 ms and caps at 30000 ms."
                     .to_string(),
             )),
         ),
@@ -168,7 +196,9 @@ fn write_stdin_tool_matches_expected_spec() {
                 Some(vec!["session_id".to_string()]),
                 Some(false.into())
             ),
-            output_schema: Some(unified_exec_output_schema()),
+            output_schema: Some(unified_exec_output_schema(
+                "Session identifier for a still-running process. Completion behavior is determined by the tool that started it."
+            )),
         })
     );
 }

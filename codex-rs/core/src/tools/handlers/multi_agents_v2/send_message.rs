@@ -30,7 +30,7 @@ impl Handler {
         let args: SendMessageArgs = parse_arguments(&arguments)?;
         handle_message_string_tool(
             invocation,
-            MessageDeliveryMode::QueueOnly,
+            MessageDeliveryMode::Message,
             args.target,
             args.message,
         )

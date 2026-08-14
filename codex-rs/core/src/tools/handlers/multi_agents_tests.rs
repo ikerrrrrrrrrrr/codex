@@ -1144,7 +1144,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                         && communication.other_recipients.is_empty()
                         && communication.content.is_empty()
                         && communication.encrypted_content.as_deref() == Some("encrypted-send-message")
-                        && !communication.trigger_turn
+                        && communication.trigger_turn
             )
     }));
 }
@@ -1340,7 +1340,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                         && communication.other_recipients.is_empty()
                         && communication.content.is_empty()
                         && communication.encrypted_content.as_deref() == Some("encrypted-done")
-                        && !communication.trigger_turn
+                        && communication.trigger_turn
             )
     }));
 }
@@ -2848,23 +2848,30 @@ async fn resume_agent_rejects_when_depth_limit_exceeded() {
 }
 
 #[tokio::test]
-async fn wait_agent_rejects_non_positive_timeout() {
+async fn wait_agent_ignores_legacy_timeout() {
     let (session, turn) = make_session_and_context().await;
+    let agent_id = ThreadId::new();
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
         "wait_agent",
         function_payload(json!({
-            "targets": [ThreadId::new().to_string()],
+            "targets": [agent_id.to_string()],
             "timeout_ms": 0
         })),
     );
-    let Err(err) = WaitAgentHandler::default().handle(invocation).await else {
-        panic!("non-positive timeout should be rejected");
-    };
+    let output = WaitAgentHandler::default()
+        .handle(invocation)
+        .await
+        .expect("legacy timeout should be ignored");
+    let (content, _) = expect_text_output(output);
+    let result: wait::WaitAgentResult = serde_json::from_str(&content).expect("valid result");
     assert_eq!(
-        err,
-        FunctionCallError::RespondToModel("timeout_ms must be greater than zero".to_string())
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::from([(agent_id.to_string(), AgentStatus::NotFound)]),
+            timed_out: false,
+        }
     );
 }
 
@@ -2989,7 +2996,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "No agent updates are currently queued.".to_string(),
             timed_out: false,
         }
     );
@@ -2997,7 +3004,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_clamps_timeout_below_configured_min() {
+async fn multi_agent_v2_wait_agent_ignores_legacy_timeout_below_configured_min() {
     let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config
@@ -3023,21 +3030,15 @@ async fn multi_agent_v2_wait_agent_clamps_timeout_below_configured_min() {
     let elapsed = started_at.elapsed();
     tokio::time::resume();
 
-    assert!(
-        elapsed >= Duration::from_millis(/*millis*/ 50)
-            && elapsed <= Duration::from_millis(/*millis*/ 51),
-        "wait_agent should time out at the configured minimum: {elapsed:?}"
-    );
+    assert_eq!(elapsed, Duration::ZERO);
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message:
-                "Wait timed out.\n\nRequested timeout of 1ms was clamped to the minimum of 50ms."
-                    .to_string(),
-            timed_out: true,
+            message: "No agent updates are currently queued.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3071,8 +3072,8 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() 
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
+            message: "No agent updates are currently queued.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3103,10 +3104,7 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
         )),
     )
     .await;
-    assert!(
-        early.is_err(),
-        "wait_agent should not return before the configured default timeout"
-    );
+    assert!(early.is_ok(), "wait_agent should return immediately");
 
     let output = timeout(
         Duration::from_secs(/*secs*/ 1),
@@ -3126,8 +3124,8 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
+            message: "No agent updates are currently queued.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3166,15 +3164,15 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
+            message: "No agent updates are currently queued.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_rejects_timeout_above_configured_max() {
+async fn multi_agent_v2_wait_agent_ignores_timeout_above_configured_max() {
     let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config
@@ -3186,7 +3184,7 @@ async fn multi_agent_v2_wait_agent_rejects_timeout_above_configured_max() {
     config.multi_agent_v2.default_wait_timeout_ms = 1;
     set_turn_config(&mut turn, config);
 
-    let Err(err) = WaitAgentHandlerV2::default()
+    let output = WaitAgentHandlerV2::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -3194,12 +3192,16 @@ async fn multi_agent_v2_wait_agent_rejects_timeout_above_configured_max() {
             function_payload(json!({"timeout_ms": 500})),
         ))
         .await
-    else {
-        panic!("timeout above configured maximum should be rejected");
-    };
+        .expect("legacy timeout should be ignored");
+    let (content, _) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("valid result");
     assert_eq!(
-        err,
-        FunctionCallError::RespondToModel("timeout_ms must be at most 50".to_string())
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "No agent updates are currently queued.".to_string(),
+            timed_out: false,
+        }
     );
 }
 
@@ -3231,8 +3233,8 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() 
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
+            message: "No agent updates are currently queued.".to_string(),
+            timed_out: false,
         }
     );
     assert_eq!(success, None);
@@ -3275,7 +3277,7 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
 }
 
 #[tokio::test]
-async fn wait_agent_times_out_when_status_is_not_final() {
+async fn wait_agent_returns_current_non_final_status() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3304,8 +3306,8 @@ async fn wait_agent_times_out_when_status_is_not_final() {
     assert_eq!(
         result,
         wait::WaitAgentResult {
-            status: HashMap::new(),
-            timed_out: true
+            status: HashMap::from([(agent_id.to_string(), AgentStatus::PendingInit)]),
+            timed_out: false
         }
     );
     assert_eq!(success, None);
@@ -3318,7 +3320,7 @@ async fn wait_agent_times_out_when_status_is_not_final() {
 }
 
 #[tokio::test]
-async fn wait_agent_clamps_short_timeouts_to_minimum() {
+async fn wait_agent_returns_immediately_with_legacy_short_timeout() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3343,10 +3345,7 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
         WaitAgentHandler::default().handle(invocation),
     )
     .await;
-    assert!(
-        early.is_err(),
-        "wait_agent should not return before the minimum timeout clamp"
-    );
+    assert!(early.is_ok(), "wait_agent should return immediately");
 
     let _ = thread
         .thread
@@ -3493,7 +3492,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "No agent updates are currently queued.".to_string(),
             timed_out: false,
         }
     );
@@ -3577,7 +3576,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "Agent updates are queued.".to_string(),
             timed_out: false,
         }
     );
@@ -3585,7 +3584,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
+async fn multi_agent_v2_wait_agent_is_a_point_in_time_snapshot() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -3671,7 +3670,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "No agent updates are currently queued.".to_string(),
             timed_out: false,
         }
     );
@@ -3762,7 +3761,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
+            message: "No agent updates are currently queued.".to_string(),
             timed_out: false,
         }
     );

@@ -11,6 +11,43 @@ pub struct CommandToolOptions {
     pub exec_permission_approvals_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecCommandToolKind {
+    Standard,
+    Background,
+}
+
+impl ExecCommandToolKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Standard => "exec_command",
+            Self::Background => "exec_background",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Standard => {
+                "Runs a command in a managed terminal. If it remains running after the initial yield, it stays inspectable by session ID; completion does not wake the thread."
+            }
+            Self::Background => {
+                "Starts managed background work whose completion matters to the task. Returns a session ID after the initial yield; completion wakes the thread with bounded final output."
+            }
+        }
+    }
+
+    fn session_description(self) -> &'static str {
+        match self {
+            Self::Standard => {
+                "Session identifier for a still-running process. Completion does not wake the thread; use write_stdin for explicit interaction or inspection."
+            }
+            Self::Background => {
+                "Session identifier for managed background work. Completion wakes an idle thread or joins the next safe step of an active turn."
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub fn create_exec_command_tool(options: CommandToolOptions) -> ToolSpec {
     create_exec_command_tool_with_environment_id(
@@ -23,10 +60,46 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     include_environment_id: bool,
     include_shell_parameter: bool,
 ) -> ToolSpec {
-    let yield_time_ms_description = if cfg!(windows) {
-        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
-    } else {
-        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+    create_unified_exec_tool(
+        options,
+        include_environment_id,
+        include_shell_parameter,
+        ExecCommandToolKind::Standard,
+    )
+}
+
+pub(crate) fn create_exec_background_tool_with_environment_id(
+    options: CommandToolOptions,
+    include_environment_id: bool,
+    include_shell_parameter: bool,
+) -> ToolSpec {
+    create_unified_exec_tool(
+        options,
+        include_environment_id,
+        include_shell_parameter,
+        ExecCommandToolKind::Background,
+    )
+}
+
+fn create_unified_exec_tool(
+    options: CommandToolOptions,
+    include_environment_id: bool,
+    include_shell_parameter: bool,
+    kind: ExecCommandToolKind,
+) -> ToolSpec {
+    let yield_time_ms_description = match (kind, cfg!(windows)) {
+        (ExecCommandToolKind::Standard, true) => {
+            "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. Defaults to 10000 ms; effective range on Windows is 10000-30000 ms."
+        }
+        (ExecCommandToolKind::Standard, false) => {
+            "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+        }
+        (ExecCommandToolKind::Background, true) => {
+            "Initial output window before returning the background session ID. Defaults to 1000 ms; effective range on Windows is 10000-30000 ms."
+        }
+        (ExecCommandToolKind::Background, false) => {
+            "Initial output window before returning the background session ID. Defaults to 1000 ms; effective range is 250-30000 ms."
+        }
     };
     let mut properties = BTreeMap::from([
         (
@@ -89,15 +162,11 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     ));
 
     ToolSpec::Function(ResponsesApiTool {
-        name: "exec_command".to_string(),
+        name: kind.name().to_string(),
         description: if cfg!(windows) {
-            format!(
-                "Runs a command in a managed terminal. If it remains running, the session continues in the background and wakes the thread when it exits.\n\n{}",
-                windows_shell_guidance()
-            )
+            format!("{}\n\n{}", kind.description(), windows_shell_guidance())
         } else {
-            "Runs a command in a managed terminal. If it remains running, the session continues in the background and wakes the thread when it exits."
-                .to_string()
+            kind.description().to_string()
         },
         strict: false,
         defer_loading: None,
@@ -106,7 +175,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
             Some(vec!["cmd".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(unified_exec_output_schema()),
+        output_schema: Some(unified_exec_output_schema(kind.session_description())),
     })
 }
 
@@ -115,21 +184,21 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         (
             "session_id".to_string(),
             JsonSchema::number(Some(
-                "Identifier of the managed terminal session. Its exit automatically wakes the thread."
+                "Identifier of the managed terminal session. Completion behavior is determined by the tool that started it."
                     .to_string(),
             )),
         ),
         (
             "chars".to_string(),
             JsonSchema::string(Some(
-                "Bytes to write to stdin. Empty input waits for output without writing."
+                "Bytes to write to stdin. Empty or omitted input returns an immediate non-consuming output snapshot."
                     .to_string(),
             )),
         ),
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; explicit empty polls wait 5000-300000 ms by default."
+                "Wait before yielding output after writing non-empty input. Defaults to 250 ms and caps at 30000 ms."
                     .to_string(),
             )),
         ),
@@ -160,7 +229,9 @@ pub fn create_write_stdin_tool() -> ToolSpec {
             Some(vec!["session_id".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(unified_exec_output_schema()),
+        output_schema: Some(unified_exec_output_schema(
+            "Session identifier for a still-running process. Completion behavior is determined by the tool that started it.",
+        )),
     })
 }
 
@@ -271,7 +342,7 @@ pub fn request_permissions_tool_description() -> String {
         .to_string()
 }
 
-fn unified_exec_output_schema() -> Value {
+fn unified_exec_output_schema(session_description: &str) -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -289,7 +360,7 @@ fn unified_exec_output_schema() -> Value {
             },
             "session_id": {
                 "type": "number",
-                "description": "Session identifier for a still-running process. Its exit automatically wakes an idle thread or joins the next step of an active turn; use write_stdin only for explicit interaction or inspection."
+                "description": session_description
             },
             "original_token_count": {
                 "type": "number",

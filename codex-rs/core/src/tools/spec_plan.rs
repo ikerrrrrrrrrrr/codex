@@ -970,7 +970,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
 
     match shell_type_for_model_and_features(&turn_context.model_info, features) {
         ConfigShellToolType::UnifiedExec => {
-            registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
+            let handler_options = ExecCommandHandlerOptions {
                 allow_login_shell,
                 exec_permission_approvals_enabled,
                 include_environment_id,
@@ -978,7 +978,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
                     turn_context,
                     context.environments,
                 ),
-            }));
+            };
+            registry.add(ExecCommandHandler::new(handler_options));
+            registry.add(ExecCommandHandler::new_background(handler_options));
             registry.add(WriteStdinHandler);
 
             if supports_shell_command {

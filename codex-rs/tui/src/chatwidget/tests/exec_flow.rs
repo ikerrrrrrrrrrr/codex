@@ -624,49 +624,6 @@ async fn unified_exec_interaction_after_task_complete_is_suppressed() {
 }
 
 #[tokio::test]
-async fn unified_exec_wait_after_final_agent_message_snapshot() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    handle_turn_started(&mut chat, "turn-1");
-
-    begin_unified_exec_startup(&mut chat, "call-wait", "proc-1", "cargo test -p codex-core");
-    terminal_interaction(&mut chat, "call-wait-stdin", "proc-1", "");
-
-    complete_assistant_message(&mut chat, "msg-1", "Final response.", /*phase*/ None);
-    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
-
-    let cells = drain_insert_history(&mut rx);
-    let combined = cells
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<String>();
-    assert_chatwidget_snapshot!("unified_exec_wait_after_final_agent_message", combined);
-}
-
-#[tokio::test]
-async fn unified_exec_wait_before_streamed_agent_message_snapshot() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    handle_turn_started(&mut chat, "turn-1");
-
-    begin_unified_exec_startup(
-        &mut chat,
-        "call-wait-stream",
-        "proc-1",
-        "cargo test -p codex-core",
-    );
-    terminal_interaction(&mut chat, "call-wait-stream-stdin", "proc-1", "");
-
-    handle_agent_message_delta(&mut chat, "Streaming response.");
-    handle_turn_completed(&mut chat, "turn-wait-1", /*duration_ms*/ None);
-
-    let cells = drain_insert_history(&mut rx);
-    let combined = cells
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<String>();
-    assert_chatwidget_snapshot!("unified_exec_wait_before_streamed_agent_message", combined);
-}
-
-#[tokio::test]
 async fn final_worked_for_uses_cumulative_turn_duration_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     handle_turn_started(&mut chat, "turn-1");
@@ -700,32 +657,6 @@ async fn final_worked_for_uses_cumulative_turn_duration_snapshot() {
 }
 
 #[tokio::test]
-async fn unified_exec_wait_status_header_updates_on_late_command_display() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.on_task_started();
-    chat.unified_exec_processes.push(UnifiedExecProcessSummary {
-        key: "proc-1".to_string(),
-        call_id: "call-1".to_string(),
-        command_display: "sleep 5".to_string(),
-        recent_chunks: Vec::new(),
-    });
-
-    terminal_interaction(&mut chat, "call-1", "proc-1", "");
-
-    assert!(chat.transcript.active_cell.is_none());
-    assert_eq!(
-        chat.status_state.current_status.header,
-        "Waiting for background terminal"
-    );
-    let status = chat
-        .bottom_pane
-        .status_widget()
-        .expect("status indicator should be visible");
-    assert_eq!(status.header(), "Waiting for background terminal");
-    assert_eq!(status.details(), Some("sleep 5"));
-}
-
-#[tokio::test]
 async fn unified_exec_empty_poll_for_finished_process_does_not_show_waiting_status() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.on_task_started();
@@ -738,56 +669,6 @@ async fn unified_exec_empty_poll_for_finished_process_does_not_show_waiting_stat
         .status_widget()
         .expect("task status indicator should remain visible");
     assert_eq!(status.header(), "Working");
-    assert!(chat.unified_exec_wait_streak.is_none());
-}
-
-#[tokio::test]
-async fn unified_exec_waiting_multiple_empty_snapshots() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.on_task_started();
-    begin_unified_exec_startup(&mut chat, "call-wait-1", "proc-1", "just fix");
-
-    terminal_interaction(&mut chat, "call-wait-1a", "proc-1", "");
-    terminal_interaction(&mut chat, "call-wait-1b", "proc-1", "");
-    assert_eq!(
-        chat.status_state.current_status.header,
-        "Waiting for background terminal"
-    );
-    let status = chat
-        .bottom_pane
-        .status_widget()
-        .expect("status indicator should be visible");
-    assert_eq!(status.header(), "Waiting for background terminal");
-    assert_eq!(status.details(), Some("just fix"));
-
-    handle_turn_completed(&mut chat, "turn-wait-3", /*duration_ms*/ None);
-
-    let cells = drain_insert_history(&mut rx);
-    let combined = cells
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<String>();
-    assert_chatwidget_snapshot!("unified_exec_waiting_multiple_empty_after", combined);
-}
-
-#[tokio::test]
-async fn unified_exec_wait_status_renders_command_in_single_details_row_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.on_task_started();
-    begin_unified_exec_startup(
-        &mut chat,
-        "call-wait-ui",
-        "proc-ui",
-        "cargo test -p codex-core -- --exact some::very::long::test::name",
-    );
-
-    terminal_interaction(&mut chat, "call-wait-ui-stdin", "proc-ui", "");
-
-    let rendered = render_bottom_popup(&chat, /*width*/ 48);
-    assert_chatwidget_snapshot!(
-        "unified_exec_wait_status_renders_command_in_single_details_row",
-        normalize_snapshot_paths(rendered)
-    );
 }
 
 #[tokio::test]
@@ -815,16 +696,12 @@ async fn unified_exec_non_empty_then_empty_snapshots() {
 
     terminal_interaction(&mut chat, "call-wait-3a", "proc-3", "pwd\n");
     terminal_interaction(&mut chat, "call-wait-3b", "proc-3", "");
-    assert_eq!(
-        chat.status_state.current_status.header,
-        "Waiting for background terminal"
-    );
+    assert_eq!(chat.status_state.current_status.header, "Working");
     let status = chat
         .bottom_pane
         .status_widget()
         .expect("status indicator should be visible");
-    assert_eq!(status.header(), "Waiting for background terminal");
-    assert_eq!(status.details(), Some("just fix"));
+    assert_eq!(status.header(), "Working");
     let pre_cells = drain_insert_history(&mut rx);
     let active_combined = pre_cells
         .iter()
@@ -1345,28 +1222,6 @@ async fn interrupt_preserves_unified_exec_processes() {
     );
 
     let _ = drain_insert_history(&mut rx);
-}
-
-#[tokio::test]
-async fn interrupt_preserves_unified_exec_wait_streak_snapshot() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    handle_turn_started(&mut chat, "turn-1");
-
-    let begin = begin_unified_exec_startup(&mut chat, "call-1", "process-1", "just fix");
-    terminal_interaction(&mut chat, "call-1a", "process-1", "");
-
-    handle_turn_interrupted(&mut chat, "turn-1");
-
-    end_exec(&mut chat, begin, "", "", /*exit_code*/ 0);
-    let cells = drain_insert_history(&mut rx);
-    let combined = cells
-        .iter()
-        .map(|lines| lines_to_single_string(lines))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let snapshot = format!("cells={}\n{combined}", cells.len());
-    assert_chatwidget_snapshot!("interrupt_preserves_unified_exec_wait_streak", snapshot);
 }
 
 #[tokio::test]

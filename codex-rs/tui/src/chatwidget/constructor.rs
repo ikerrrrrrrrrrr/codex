@@ -159,7 +159,6 @@ impl ChatWidget {
             pending_collab_spawn_requests: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
-            unified_exec_wait_streak: None,
             turn_lifecycle: TurnLifecycleState::new(prevent_idle_sleep),
             safety_buffering: SafetyBufferingState::default(),
             task_complete_pending: false,

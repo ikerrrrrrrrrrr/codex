@@ -16,6 +16,8 @@ use serde::Deserialize;
 use super::super::shell_spec::create_write_stdin_tool;
 use super::post_unified_exec_tool_use_payload;
 
+const DEFAULT_TAIL_OUTPUT_LINES: usize = 100;
+
 #[derive(Debug, Deserialize)]
 struct WriteStdinArgs {
     // The model is trained on `session_id`.
@@ -78,11 +80,11 @@ impl WriteStdinHandler {
             ));
         }
         let manager = &session.services.unified_exec_manager;
-        let response = if let Some(line_count) = args.tail_output_lines {
+        let response = if args.chars.is_empty() {
             manager
                 .tail_terminal_output(
                     args.session_id,
-                    line_count,
+                    args.tail_output_lines.unwrap_or(DEFAULT_TAIL_OUTPUT_LINES),
                     args.max_output_tokens,
                     turn.model_info.truncation_policy.into(),
                 )
@@ -115,7 +117,7 @@ impl CoreToolRuntime for WriteStdinHandler {
 
     fn pre_tool_use_payload(&self, _invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
         // `write_stdin` is transport for an existing exec session. Empty writes
-        // are background polls, and non-empty writes continue a command that
+        // inspect retained output, and non-empty writes continue a command that
         // already ran PreToolUse as Bash, so do not emit a second pre hook here.
         None
     }
@@ -125,7 +127,7 @@ impl CoreToolRuntime for WriteStdinHandler {
         invocation: &ToolInvocation,
         result: &dyn crate::tools::context::ToolOutput,
     ) -> Option<PostToolUsePayload> {
-        // A `write_stdin` poll can observe final completion for the original
+        // A non-empty `write_stdin` call can observe final completion for the original
         // `exec_command`; emit that command's matching Bash PostToolUse.
         post_unified_exec_tool_use_payload(invocation, result)
     }

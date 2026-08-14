@@ -23,6 +23,7 @@ use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
 use crate::unified_exec::ExecCommandRequest;
+use crate::unified_exec::TerminalCompletionDelivery;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcessManager;
@@ -40,6 +41,8 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_path_uri::PathConvention;
 
 use super::super::shell_spec::CommandToolOptions;
+use super::super::shell_spec::ExecCommandToolKind;
+use super::super::shell_spec::create_exec_background_tool_with_environment_id;
 use super::super::shell_spec::create_exec_command_tool_with_environment_id;
 use super::ExecCommandArgs;
 use super::ExecCommandEnvironmentArgs;
@@ -57,6 +60,7 @@ pub(crate) struct ExecCommandHandlerOptions {
 
 pub struct ExecCommandHandler {
     options: ExecCommandHandlerOptions,
+    kind: ExecCommandToolKind,
 }
 
 impl Default for ExecCommandHandler {
@@ -68,30 +72,63 @@ impl Default for ExecCommandHandler {
                 include_environment_id: false,
                 include_shell_parameter: true,
             },
+            kind: ExecCommandToolKind::Standard,
         }
     }
 }
 
 impl ExecCommandHandler {
     pub(crate) fn new(options: ExecCommandHandlerOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            kind: ExecCommandToolKind::Standard,
+        }
+    }
+
+    pub(crate) fn new_background(options: ExecCommandHandlerOptions) -> Self {
+        Self {
+            options,
+            kind: ExecCommandToolKind::Background,
+        }
+    }
+
+    fn completion_delivery(&self) -> TerminalCompletionDelivery {
+        match self.kind {
+            ExecCommandToolKind::Standard => TerminalCompletionDelivery::Silent,
+            ExecCommandToolKind::Background => TerminalCompletionDelivery::WakeThread,
+        }
+    }
+
+    fn default_yield_time_ms(&self) -> u64 {
+        match self.kind {
+            ExecCommandToolKind::Standard => 10_000,
+            ExecCommandToolKind::Background => 1_000,
+        }
     }
 }
 
 impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
     fn tool_name(&self) -> ToolName {
-        ToolName::plain("exec_command")
+        ToolName::plain(self.kind.name())
     }
 
     fn spec(&self) -> ToolSpec {
-        create_exec_command_tool_with_environment_id(
-            CommandToolOptions {
-                allow_login_shell: self.options.allow_login_shell,
-                exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
-            },
-            self.options.include_environment_id,
-            self.options.include_shell_parameter,
-        )
+        let options = CommandToolOptions {
+            allow_login_shell: self.options.allow_login_shell,
+            exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
+        };
+        match self.kind {
+            ExecCommandToolKind::Standard => create_exec_command_tool_with_environment_id(
+                options,
+                self.options.include_environment_id,
+                self.options.include_shell_parameter,
+            ),
+            ExecCommandToolKind::Background => create_exec_background_tool_with_environment_id(
+                options,
+                self.options.include_environment_id,
+                self.options.include_shell_parameter,
+            ),
+        }
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
@@ -121,9 +158,10 @@ impl ExecCommandHandler {
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
             _ => {
-                return Err(FunctionCallError::RespondToModel(
-                    "exec_command handler received unsupported payload".to_string(),
-                ));
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "{} handler received unsupported payload",
+                    self.kind.name()
+                )));
             }
         };
 
@@ -250,6 +288,7 @@ impl ExecCommandHandler {
             prefix_rule,
             ..
         } = args;
+        let yield_time_ms = yield_time_ms.unwrap_or_else(|| self.default_yield_time_ms());
 
         let exec_permission_approvals_enabled =
             session.features().enabled(Feature::ExecPermissionApprovals);
@@ -320,7 +359,7 @@ impl ExecCommandHandler {
             Arc::clone(&context.step_context),
             Some(&tracker),
             &context.call_id,
-            "exec_command",
+            self.kind.name(),
         )
         .await;
         // Keep the reservation when interception returns `Ok(None)`: the normal command below
@@ -367,6 +406,7 @@ impl ExecCommandHandler {
                         .permissions_preapproved,
                     justification,
                     prefix_rule,
+                    completion_delivery: self.completion_delivery(),
                 },
                 &context,
             )
@@ -399,7 +439,8 @@ impl ExecCommandHandler {
                 }))
             }
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_command failed for `{command_for_display}`: {err:?}"
+                "{} failed for `{command_for_display}`: {err:?}",
+                self.kind.name()
             ))),
         }
     }
@@ -429,14 +470,15 @@ impl CoreToolRuntime for ExecCommandHandler {
         updated_input: serde_json::Value,
     ) -> Result<ToolInvocation, FunctionCallError> {
         let ToolPayload::Function { arguments } = invocation.payload else {
-            return Err(FunctionCallError::RespondToModel(
-                "hook input rewrite received unsupported exec_command payload".to_string(),
-            ));
+            return Err(FunctionCallError::RespondToModel(format!(
+                "hook input rewrite received unsupported {} payload",
+                self.kind.name()
+            )));
         };
         invocation.payload = ToolPayload::Function {
             arguments: rewrite_function_string_argument(
                 &arguments,
-                "exec_command",
+                self.kind.name(),
                 "cmd",
                 updated_hook_command(&updated_input)?,
             )?,

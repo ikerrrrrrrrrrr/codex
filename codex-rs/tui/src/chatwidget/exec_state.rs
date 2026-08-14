@@ -32,28 +32,6 @@ impl UnifiedExecWaitState {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct UnifiedExecWaitStreak {
-    pub(super) process_id: String,
-    pub(super) command_display: Option<String>,
-}
-
-impl UnifiedExecWaitStreak {
-    pub(super) fn new(process_id: String, command_display: Option<String>) -> Self {
-        Self {
-            process_id,
-            command_display: command_display.filter(|display| !display.is_empty()),
-        }
-    }
-
-    pub(super) fn update_command_display(&mut self, command_display: Option<String>) {
-        if self.command_display.is_some() {
-            return;
-        }
-        self.command_display = command_display.filter(|display| !display.is_empty());
-    }
-}
-
 pub(super) fn is_unified_exec_source(source: ExecCommandSource) -> bool {
     matches!(
         source,

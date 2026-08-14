@@ -6,17 +6,6 @@
 use super::*;
 
 impl ChatWidget {
-    pub(super) fn flush_unified_exec_wait_streak(&mut self) {
-        let Some(wait) = self.unified_exec_wait_streak.take() else {
-            return;
-        };
-        self.transcript.needs_final_message_separator = true;
-        let cell = history_cell::new_unified_exec_interaction(wait.command_display, String::new());
-        self.app_event_tx
-            .send(AppEvent::InsertHistoryCell(Box::new(cell)));
-        self.restore_reasoning_status_header();
-    }
-
     pub(super) fn on_command_execution_started(&mut self, item: ThreadItem) {
         let ThreadItem::CommandExecution {
             id,
@@ -81,54 +70,15 @@ impl ChatWidget {
             .iter()
             .find(|process| process.key == process_id)
             .map(|process| process.command_display.clone());
-        if stdin.is_empty() && command_display.is_none() {
+        if stdin.is_empty() {
             return;
         }
 
         self.flush_answer_stream_with_separator();
-        if stdin.is_empty() {
-            // Empty stdin means we are polling for background output.
-            // Surface this in the status indicator (single "waiting" surface) instead of
-            // the transcript. Keep the header short so the interrupt hint remains visible.
-            self.bottom_pane.ensure_status_indicator();
-            self.bottom_pane
-                .set_interrupt_hint_visible(/*visible*/ true);
-            self.status_state.terminal_title_status_kind =
-                TerminalTitleStatusKind::WaitingForBackgroundTerminal;
-            self.set_status(
-                "Waiting for background terminal".to_string(),
-                command_display.clone(),
-                StatusDetailsCapitalization::Preserve,
-                /*details_max_lines*/ 1,
-            );
-            match &mut self.unified_exec_wait_streak {
-                Some(wait) if wait.process_id == process_id => {
-                    wait.update_command_display(command_display);
-                }
-                Some(_) => {
-                    self.flush_unified_exec_wait_streak();
-                    self.unified_exec_wait_streak =
-                        Some(UnifiedExecWaitStreak::new(process_id, command_display));
-                }
-                None => {
-                    self.unified_exec_wait_streak =
-                        Some(UnifiedExecWaitStreak::new(process_id, command_display));
-                }
-            }
-            self.request_redraw();
-        } else {
-            if self
-                .unified_exec_wait_streak
-                .as_ref()
-                .is_some_and(|wait| wait.process_id == process_id)
-            {
-                self.flush_unified_exec_wait_streak();
-            }
-            self.add_to_history(history_cell::new_unified_exec_interaction(
-                command_display,
-                stdin,
-            ));
-        }
+        self.add_to_history(history_cell::new_unified_exec_interaction(
+            command_display,
+            stdin,
+        ));
     }
 
     pub(super) fn on_command_execution_completed(&mut self, item: ThreadItem) {
@@ -142,14 +92,6 @@ impl ChatWidget {
             return;
         };
         if is_unified_exec_source(*source) {
-            if let Some(process_id) = process_id.as_deref()
-                && self
-                    .unified_exec_wait_streak
-                    .as_ref()
-                    .is_some_and(|wait| wait.process_id == process_id)
-            {
-                self.flush_unified_exec_wait_streak();
-            }
             self.track_unified_exec_process_end(id, process_id.as_deref());
             if !self.bottom_pane.is_task_running() {
                 return;

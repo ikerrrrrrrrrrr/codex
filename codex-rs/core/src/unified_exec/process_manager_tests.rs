@@ -6,6 +6,16 @@ use tokio::sync::Notify;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
+#[tokio::test]
+async fn silent_completion_delivery_never_wakes() {
+    let state = InitialExecCommandState::completed_with_delivery(
+        /*returned_background*/ true,
+        TerminalCompletionDelivery::Silent,
+    );
+
+    assert!(!state.should_wake().await);
+}
+
 #[test]
 fn unified_exec_env_injects_defaults() {
     let env = apply_unified_exec_env(HashMap::new());
@@ -427,6 +437,7 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         additional_permissions_preapproved: false,
         justification: None,
         prefix_rule: None,
+        completion_delivery: TerminalCompletionDelivery::Silent,
     };
 
     let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));

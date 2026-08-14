@@ -143,7 +143,6 @@ impl ChatWidget {
             }
             self.request_pending_usage_output_insertion_after_stream_shutdown();
         }
-        self.flush_unified_exec_wait_streak();
         if !from_replay {
             self.collect_runtime_metrics_delta();
             let runtime_metrics =
@@ -185,7 +184,6 @@ impl ChatWidget {
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;
-        self.unified_exec_wait_streak = None;
         if !from_replay {
             let body = Notification::agent_turn_preview(&notification_response);
             self.set_ambient_pet_notification(crate::pets::PetNotificationKind::Review, body);
@@ -330,7 +328,6 @@ impl ChatWidget {
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;
-        self.unified_exec_wait_streak = None;
         self.adaptive_chunking.reset();
         self.stream_controller = None;
         self.plan_stream_controller = None;

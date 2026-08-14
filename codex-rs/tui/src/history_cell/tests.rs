@@ -578,13 +578,6 @@ fn unified_exec_interaction_cell_renders_input() {
 }
 
 #[test]
-fn unified_exec_interaction_cell_renders_wait() {
-    let cell = new_unified_exec_interaction(/*command_display*/ None, String::new());
-    let lines = render_transcript(&cell);
-    assert_eq!(lines, vec!["• Waited for background terminal"]);
-}
-
-#[test]
 fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics() {
     let summary = RuntimeMetricsSummary {
         tool_calls: RuntimeMetricTotals {

@@ -401,6 +401,34 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         ]),
     )
     .await;
+    let queued_child_request = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_has_model(request, ROLE_MODEL)
+                && request_has_input_type(request, "agent_message")
+                && body_contains(request, QUEUED_MESSAGE)
+                && !body_contains(request, FOLLOWUP_TASK)
+        },
+        sse(vec![
+            ev_response_created("resp-worker-message"),
+            ev_assistant_message("msg-worker-message", "queued message handled"),
+            ev_completed("resp-worker-message"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            !request_has_model(request, ROLE_MODEL)
+                && body_contains(request, "queued message handled")
+        },
+        sse(vec![
+            ev_response_created("resp-parent-message"),
+            ev_assistant_message("msg-parent-message", "worker message observed"),
+            ev_completed("resp-parent-message"),
+        ]),
+    )
+    .await;
     let followup_child_request = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
@@ -500,7 +528,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         .received_requests()
         .await
         .expect("captured response requests");
-    assert!(!followup_child_request.requests().iter().any(|request| {
+    assert!(queued_child_request.requests().iter().any(|request| {
         request.body_json()["client_metadata"]["thread_id"] == json!(worker_thread_id)
             && request.body_contains_text(QUEUED_MESSAGE)
             && !request.body_contains_text(FOLLOWUP_TASK)

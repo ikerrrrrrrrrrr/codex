@@ -1,12 +1,13 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 1030
 expression: combined
 ---
-• Waiting for 2 agents
+• Checking 2 agents
   └ Robie [explorer]
     Ada [reviewer]
 
 
-• Finished waiting
+• Checked agent status
   └ Robie [explorer]: Completed - Done
     Ada [reviewer]: Running

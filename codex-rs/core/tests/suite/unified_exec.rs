@@ -1007,7 +1007,7 @@ async fn background_terminal_completion_starts_a_new_turn() -> Result<()> {
     let responses = mount_sse_sequence(
         &server,
         vec![
-            tool_response("resp-1", call_id, "exec_command", &args)?,
+            tool_response("resp-1", call_id, "exec_background", &args)?,
             assistant_response("resp-2", "msg-1", "waiting for the terminal"),
             assistant_response("resp-3", "msg-2", "resumed after terminal completion"),
         ],
@@ -1049,6 +1049,58 @@ async fn background_terminal_completion_starts_a_new_turn() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_exec_completion_stays_silent_after_yield() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_unified_exec_test(&server).await?;
+    let call_id = "uexec-silent-after-yield";
+    let args = json!({
+        "cmd": "sleep 0.6; printf 'SILENT-ON-EXIT-MARKER'",
+        "yield_time_ms": 250,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            tool_response("resp-silent-1", call_id, "exec_command", &args)?,
+            assistant_response("resp-silent-2", "msg-silent", "command remains inspectable"),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "start an ordinary terminal",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let mut turn_complete = false;
+    let mut wake_up_seen = false;
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::ExecCommandEnd(event) if event.call_id == call_id => break,
+            EventMsg::TurnComplete(_) => turn_complete = true,
+            EventMsg::WakeUp(_) => wake_up_seen = true,
+            _ => {}
+        }
+    }
+    if !turn_complete {
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(!wake_up_seen, "ordinary exec completion must remain silent");
+    assert_eq!(responses.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_terminal_completion_waits_for_user_input_in_plan_mode() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
@@ -1064,7 +1116,7 @@ async fn background_terminal_completion_waits_for_user_input_in_plan_mode() -> R
     let responses = mount_sse_sequence(
         &server,
         vec![
-            tool_response("resp-plan-1", call_id, "exec_command", &args)?,
+            tool_response("resp-plan-1", call_id, "exec_background", &args)?,
             assistant_response("resp-plan-2", "msg-plan-1", "waiting for the terminal"),
             assistant_response("resp-plan-3", "msg-plan-2", "handled on the next user turn"),
         ],
@@ -1128,7 +1180,7 @@ async fn terminating_a_background_terminal_does_not_wake_the_model() -> Result<(
     let responses = mount_sse_sequence(
         &server,
         vec![
-            tool_response("resp-terminate-1", call_id, "exec_command", &args)?,
+            tool_response("resp-terminate-1", call_id, "exec_background", &args)?,
             assistant_response("resp-terminate-2", "msg-terminate", "terminal is running"),
         ],
     )
@@ -1187,7 +1239,7 @@ async fn background_terminal_completion_joins_an_active_turn_after_its_tool_call
             tool_response(
                 "resp-background-start",
                 background_call_id,
-                "exec_command",
+                "exec_background",
                 &background_args,
             )?,
             assistant_response(
@@ -1257,7 +1309,7 @@ async fn background_terminal_completion_joins_an_active_turn_after_its_tool_call
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_terminal_tail_is_immediate_non_consuming_and_preserves_wake() -> Result<()> {
+async fn empty_write_stdin_is_immediate_non_consuming_and_preserves_wake() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
@@ -1270,14 +1322,11 @@ async fn background_terminal_tail_is_immediate_non_consuming_and_preserves_wake(
         "cmd": "sleep 0.6; printf 'TAIL-LINE-1\\nTAIL-LINE-2\\n'; sleep 2; printf 'WAKE-AFTER-TAIL\\n'",
         "yield_time_ms": 250,
     });
-    let tail_args = json!({
-        "session_id": 1000,
-        "tail_output_lines": 1,
-    });
+    let tail_args = json!({"session_id": 1000});
     let responses = mount_sse_sequence(
         &server,
         vec![
-            tool_response("resp-1", start_call_id, "exec_command", &start_args)?,
+            tool_response("resp-1", start_call_id, "exec_background", &start_args)?,
             assistant_response("resp-2", "msg-1", "terminal remains in the background"),
             tool_response("resp-3", tail_call_id, "write_stdin", &tail_args)?,
             assistant_response("resp-4", "msg-2", "tail inspected"),
@@ -1317,7 +1366,7 @@ async fn background_terminal_tail_is_immediate_non_consuming_and_preserves_wake(
     assert_eq!(tail_output.wall_time_seconds, 0.0);
     assert_eq!(tail_output.process_id.as_deref(), Some("1000"));
     assert_eq!(tail_output.exit_code, None);
-    assert_eq!(tail_output.output, "TAIL-LINE-2");
+    assert_eq!(tail_output.output, "TAIL-LINE-1\nTAIL-LINE-2");
 
     let wake_request = requests[4].body_json().to_string();
     assert!(wake_request.contains("<background_terminal_completion>"));
@@ -1387,7 +1436,7 @@ async fn failed_background_terminal_wakes_with_failure_context() -> Result<()> {
     let responses = mount_sse_sequence(
         &server,
         vec![
-            tool_response("resp-denied-wake-1", call_id, "exec_command", &args)?,
+            tool_response("resp-denied-wake-1", call_id, "exec_background", &args)?,
             assistant_response(
                 "resp-denied-wake-2",
                 "msg-denied-wake-1",

@@ -11,6 +11,7 @@ pub(crate) struct UnifiedExecInteractionCell {
 
 impl UnifiedExecInteractionCell {
     pub(crate) fn new(command_display: Option<String>, stdin: String) -> Self {
+        debug_assert!(!stdin.is_empty());
         Self {
             command_display,
             stdin,
@@ -24,13 +25,7 @@ impl HistoryCell for UnifiedExecInteractionCell {
             return Vec::new();
         }
         let wrap_width = width as usize;
-        let waited_only = self.stdin.is_empty();
-
-        let mut header_spans = if waited_only {
-            vec!["• Waited for background terminal".bold()]
-        } else {
-            vec!["↳ ".dim(), "Interacted with background terminal".bold()]
-        };
+        let mut header_spans = vec!["↳ ".dim(), "Interacted with background terminal".bold()];
         if let Some(command) = &self.command_display
             && !command.is_empty()
         {
@@ -42,10 +37,6 @@ impl HistoryCell for UnifiedExecInteractionCell {
         let mut out: Vec<Line<'static>> = Vec::new();
         let header_wrapped = adaptive_wrap_line(&header, RtOptions::new(wrap_width));
         push_owned_lines(&header_wrapped, &mut out);
-
-        if waited_only {
-            return out;
-        }
 
         let input_lines: Vec<Line<'static>> = self
             .stdin
@@ -65,21 +56,6 @@ impl HistoryCell for UnifiedExecInteractionCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let mut out = Vec::new();
-        if self.stdin.is_empty() {
-            if let Some(command) = self
-                .command_display
-                .as_ref()
-                .filter(|command| !command.is_empty())
-            {
-                out.push(Line::from(format!(
-                    "Waited for background terminal: {command}"
-                )));
-            } else {
-                out.push(Line::from("Waited for background terminal"));
-            }
-            return out;
-        }
-
         if let Some(command) = self
             .command_display
             .as_ref()
