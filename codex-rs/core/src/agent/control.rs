@@ -84,10 +84,14 @@ pub(crate) enum ChildCompletionDelivery {
     QueueForParent,
 }
 
-fn child_completion_item_id(child_thread_id: ThreadId, child_turn_id: &str) -> ResponseItemId {
+fn child_completion_item_id(
+    prefix: &str,
+    child_thread_id: ThreadId,
+    child_turn_id: &str,
+) -> ResponseItemId {
     let completion_key = format!("{child_thread_id}:{child_turn_id}");
     ResponseItemId::with_suffix(
-        "iac",
+        prefix,
         Uuid::new_v5(&Uuid::NAMESPACE_OID, completion_key.as_bytes()),
     )
 }
@@ -507,10 +511,13 @@ impl AgentControl {
         notification: ChildCompletionNotification<'_>,
     ) -> Option<String> {
         let parent_thread_id = notification.parent_thread_id;
-        let completion_id =
-            child_completion_item_id(notification.child_thread_id, notification.child_turn_id);
         match notification.multi_agent_version {
             MultiAgentVersion::V2 => {
+                let completion_id = child_completion_item_id(
+                    "amsg",
+                    notification.child_thread_id,
+                    notification.child_turn_id,
+                );
                 let child_agent_path = notification.child_agent_path.cloned()?;
                 let parent_agent_path = child_agent_path
                     .as_str()
@@ -545,6 +552,11 @@ impl AgentControl {
                 .map(|_| message)
             }
             MultiAgentVersion::V1 | MultiAgentVersion::Disabled => {
+                let completion_id = child_completion_item_id(
+                    "msg",
+                    notification.child_thread_id,
+                    notification.child_turn_id,
+                );
                 let child_reference = notification
                     .child_agent_path
                     .map(ToString::to_string)

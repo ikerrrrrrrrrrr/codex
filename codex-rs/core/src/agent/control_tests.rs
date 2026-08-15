@@ -2944,10 +2944,10 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         })
         .expect("completion communication");
     let completion_id = completion.id.expect("completion id");
-    assert_eq!(completion_id.as_str().len(), 40);
+    assert_eq!(completion_id.as_str().len(), 41);
     assert_eq!(
         completion_id,
-        child_completion_item_id(tester_thread_id, "tester-turn")
+        child_completion_item_id("amsg", tester_thread_id, "tester-turn")
     );
 
     let root_history = root_thread.session.clone_history().await;
@@ -2985,6 +2985,14 @@ async fn v1_completion_notifies_parent_when_child_is_missing() {
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
 
     let history = parent_thread.session.clone_history().await;
+    assert!(history.raw_items().any(|item| matches!(
+        item,
+        ResponseItem::Message {
+            id: Some(id),
+            role,
+            ..
+        } if role == "user" && id.starts_with("msg_")
+    )));
     assert_eq!(
         history_contains_text(
             history.raw_items(),

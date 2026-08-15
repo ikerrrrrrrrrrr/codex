@@ -432,10 +432,21 @@ fn prepare_response_items_clears_ids_rejected_by_responses_api() {
         "legacy-id".to_string(),
     )));
     let oversized_item = output_message(&"x".repeat(MAX_RESPONSES_API_ITEM_ID_LEN), "oversized");
+    let mismatched_item = ResponseItem::AgentMessage {
+        id: Some(codex_protocol::ResponseItemId::with_suffix(
+            "iac",
+            "ffc51281-74ef-5b2a-a645-acbeab1aa6aa",
+        )),
+        author: "/root/worker".to_string(),
+        recipient: "/root".to_string(),
+        content: Vec::new(),
+        internal_chat_message_metadata_passthrough: None,
+    };
     let mut input = vec![
         valid_item.clone(),
         unprefixed_item.clone(),
         oversized_item.clone(),
+        mismatched_item.clone(),
     ];
 
     client.prepare_response_items_for_request(&mut input);
@@ -443,9 +454,16 @@ fn prepare_response_items_clears_ids_rejected_by_responses_api() {
     unprefixed_item.set_id(/*new_id*/ None);
     let mut expected_oversized_item = oversized_item;
     expected_oversized_item.set_id(/*new_id*/ None);
+    let mut expected_mismatched_item = mismatched_item;
+    expected_mismatched_item.set_id(/*new_id*/ None);
     assert_eq!(
         input,
-        vec![valid_item, unprefixed_item, expected_oversized_item]
+        vec![
+            valid_item,
+            unprefixed_item,
+            expected_oversized_item,
+            expected_mismatched_item,
+        ]
     );
 }
 

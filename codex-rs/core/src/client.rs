@@ -943,10 +943,15 @@ impl ModelClient {
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
-            if item
-                .id()
-                .is_some_and(|id| !id.is_prefixed() || id.len() > MAX_RESPONSES_API_ITEM_ID_LEN)
-            {
+            let id_is_invalid = item.id().is_some_and(|id| {
+                id.len() > MAX_RESPONSES_API_ITEM_ID_LEN
+                    || item.id_prefix().is_none_or(|expected_prefix| {
+                        id.split_once('_').is_none_or(|(actual_prefix, suffix)| {
+                            actual_prefix != expected_prefix || suffix.is_empty()
+                        })
+                    })
+            });
+            if id_is_invalid {
                 item.set_id(/*new_id*/ None);
             }
         }
