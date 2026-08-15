@@ -160,6 +160,7 @@ const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const MAX_RESPONSES_API_ITEM_ID_LEN: usize = 64;
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
@@ -942,7 +943,10 @@ impl ModelClient {
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
-            if item.id().is_some_and(|id| !id.is_prefixed()) {
+            if item
+                .id()
+                .is_some_and(|id| !id.is_prefixed() || id.len() > MAX_RESPONSES_API_ITEM_ID_LEN)
+            {
                 item.set_id(/*new_id*/ None);
             }
         }

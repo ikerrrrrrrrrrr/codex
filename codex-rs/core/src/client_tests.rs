@@ -1,5 +1,6 @@
 use super::AuthRequestTelemetryContext;
 use super::CompactConversationRequestSettings;
+use super::MAX_RESPONSES_API_ITEM_ID_LEN;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
@@ -420,6 +421,32 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+#[test]
+fn prepare_response_items_clears_ids_rejected_by_responses_api() {
+    let client = test_model_client(SessionSource::Cli);
+    let valid_item = output_message("valid", "valid");
+    let mut unprefixed_item = output_message("unprefixed", "unprefixed");
+    unprefixed_item.set_id(Some(codex_protocol::ResponseItemId::from_server(
+        "legacy-id".to_string(),
+    )));
+    let oversized_item = output_message(&"x".repeat(MAX_RESPONSES_API_ITEM_ID_LEN), "oversized");
+    let mut input = vec![
+        valid_item.clone(),
+        unprefixed_item.clone(),
+        oversized_item.clone(),
+    ];
+
+    client.prepare_response_items_for_request(&mut input);
+
+    unprefixed_item.set_id(/*new_id*/ None);
+    let mut expected_oversized_item = oversized_item;
+    expected_oversized_item.set_id(/*new_id*/ None);
+    assert_eq!(
+        input,
+        vec![valid_item, unprefixed_item, expected_oversized_item]
+    );
 }
 
 async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> {
