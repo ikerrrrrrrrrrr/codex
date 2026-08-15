@@ -272,7 +272,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "wait_agent".to_string(),
-            description: "Return the current status of the requested agents immediately. Agent messages and final statuses automatically wake the parent thread."
+            description: "Inspect the current status of the requested agents and return immediately. This is a point-in-time snapshot, not a completion wait; agent messages and final statuses are delivered automatically."
                 .to_string(),
             strict: false,
             defer_loading: None,
@@ -285,7 +285,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Return whether agent or user updates are currently queued. Agent messages and final statuses automatically wake the parent thread."
+        description: "Inspect whether agent or user updates are currently queued and return immediately. This is a point-in-time snapshot, not a completion wait; agent messages and final statuses are delivered automatically."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -732,9 +732,8 @@ Requests for depth, thoroughness, research, investigation, or detailed codebase 
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 
 ### After you delegate
-- Agent messages and final results are delivered automatically. Use wait_agent only for an immediate status snapshot.
+- Subagents run asynchronously and deliver results automatically. Continue meaningful non-overlapping work, or end the turn if none remains.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
-- While the subagent is running in the background, do meaningful non-overlapping work immediately.
 - When a delegated coding task returns, quickly review the uploaded changes, then integrate or refine them.
 
 ### Parallel delegation patterns

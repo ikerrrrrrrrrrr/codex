@@ -44,6 +44,7 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -977,9 +978,11 @@ async fn spawned_child_receives_forked_parent_context(
 
     let server = start_mock_server().await;
 
-    let seed_turn = mount_sse_once_match(
+    let _seed_turn = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, TURN_0_FORK_PROMPT),
+        |req: &wiremock::Request| {
+            body_contains(req, TURN_0_FORK_PROMPT) && !body_contains(req, "seeded")
+        },
         sse(vec![
             ev_response_created("resp-seed-1"),
             ev_assistant_message("msg-seed-1", "seeded"),
@@ -994,7 +997,9 @@ async fn spawned_child_receives_forked_parent_context(
     }))?;
     let spawn_turn = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        |req: &wiremock::Request| {
+            body_contains(req, TURN_1_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
         sse(vec![
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
@@ -1047,10 +1052,16 @@ async fn spawned_child_receives_forked_parent_context(
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn(TURN_0_FORK_PROMPT).await?;
-    let _ = seed_turn.single_request();
 
     test.submit_turn(TURN_1_PROMPT).await?;
-    let parent_body = spawn_turn.single_request().body_json();
+    let parent_body = spawn_turn
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.body_contains_text(TURN_1_PROMPT) && !request.body_contains_text(SPAWN_CALL_ID)
+        })
+        .expect("legacy spawn parent request")
+        .body_json();
 
     let child_request = wait_for_request_with_model(&child_request_log, REQUESTED_MODEL).await?;
     assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
@@ -1088,7 +1099,10 @@ async fn spawned_child_receives_forked_parent_context(
     }))?;
     let parent = mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| body_contains(request, "reuse the legacy child"),
+        |request: &wiremock::Request| {
+            body_contains(request, "reuse the legacy child")
+                && !body_contains(request, "legacy-reuse-call")
+        },
         sse(vec![
             ev_response_created("resp-legacy-reuse"),
             ev_function_call_with_namespace(
@@ -1101,18 +1115,56 @@ async fn spawned_child_receives_forked_parent_context(
         ]),
     )
     .await;
-    let followup = mount_sse_sequence(
+    let followup_child = mount_response_once_match(
         &server,
-        vec![
-            sse(vec![ev_completed("resp-legacy-child-reuse")]),
-            sse(vec![ev_completed("resp-legacy-reuse-complete")]),
-        ],
+        |request: &wiremock::Request| {
+            body_contains(request, "legacy child follow-up")
+                && !body_contains(request, "legacy-reuse-call")
+        },
+        sse_response(sse(vec![
+            ev_response_created("resp-legacy-child-reuse"),
+            ev_assistant_message("msg-legacy-child-reuse", "legacy follow-up done"),
+            ev_completed("resp-legacy-child-reuse"),
+        ]))
+        .set_delay(Duration::from_millis(600)),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, "legacy-reuse-call"),
+        sse(vec![
+            ev_response_created("resp-legacy-reuse-complete"),
+            ev_assistant_message("msg-legacy-reuse-complete", "parent yielded again"),
+            ev_completed("resp-legacy-reuse-complete"),
+        ]),
+    )
+    .await;
+    let _followup_wake = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, "<subagent_notification>")
+                && body_contains(request, "legacy follow-up done")
+                && !body_contains(request, "parent resumed again")
+        },
+        sse(vec![
+            ev_response_created("resp-legacy-followup-wake"),
+            ev_assistant_message("msg-legacy-followup-wake", "parent resumed again"),
+            ev_completed("resp-legacy-followup-wake"),
+        ]),
     )
     .await;
 
     test.submit_turn("reuse the legacy child").await?;
-    let followup_parent_body = parent.single_request().body_json();
-    let reused_child_body = wait_for_request_with_model(&followup, REQUESTED_MODEL)
+    let followup_parent_body = parent
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.body_contains_text("reuse the legacy child")
+                && !request.body_contains_text("legacy-reuse-call")
+        })
+        .expect("legacy follow-up parent request")
+        .body_json();
+    let reused_child_body = wait_for_request_with_model(&followup_child, REQUESTED_MODEL)
         .await?
         .body_json();
     let followup_parent_turn_id = followup_parent_body["client_metadata"]["turn_id"]
@@ -1123,6 +1175,24 @@ async fn spawned_child_receives_forked_parent_context(
     assert_eq!(metadata["thread_id"], json!(child_thread_id));
     assert_parent_turn(&followup_parent_body, /*expected*/ None)?;
     assert_parent_turn(&reused_child_body, Some(followup_parent_turn_id))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let wake_requests = loop {
+        let count = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| {
+                body_contains(request, "<subagent_notification>")
+                    && body_contains(request, "legacy follow-up done")
+            })
+            .count();
+        if count > 0 || Instant::now() >= deadline {
+            break count;
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(wake_requests, 1);
     Ok(())
 }
 
@@ -1799,6 +1869,157 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
 enum CompletionScenario {
     Completed,
     TerminalError,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn matching_explicit_message_and_final_answer_are_delivered_once() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+        "task_name": "worker",
+        "model": V2_REQUESTED_MODEL,
+        "fork_turns": "none",
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, TURN_1_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-parent-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
+            ev_completed("resp-parent-spawn"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, SPAWN_CALL_ID)
+                && !body_contains(request, "Message Type: MESSAGE")
+        },
+        sse(vec![
+            ev_response_created("resp-parent-yield"),
+            ev_assistant_message("msg-parent-yield", "parent yielded"),
+            ev_completed("resp-parent-yield"),
+        ]),
+    )
+    .await;
+    let message_args = serde_json::to_string(&json!({
+        "target": "/root",
+        "message": "same child result",
+    }))?;
+    let child_request = mount_response_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, CHILD_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse_response(sse(vec![
+            ev_response_created("resp-child-message"),
+            ev_function_call_with_namespace(
+                "child-message-call",
+                MULTI_AGENT_V2_NAMESPACE,
+                "send_message",
+                &message_args,
+            ),
+            ev_completed("resp-child-message"),
+        ]))
+        .set_delay(Duration::from_millis(600)),
+    )
+    .await;
+    let child_final = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, "child-message-call"),
+        sse(vec![
+            ev_response_created("resp-child-final"),
+            ev_assistant_message("msg-child-final", "same child result"),
+            ev_completed("resp-child-final"),
+        ]),
+    )
+    .await;
+    let parent_message = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, "\"author\":\"/root/worker\"")
+                && body_contains(request, "same child result")
+                && !body_contains(request, "message handled")
+        },
+        sse(vec![
+            ev_response_created("resp-parent-message"),
+            ev_assistant_message("msg-parent-message", "message handled"),
+            ev_completed("resp-parent-message"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_model(V2_REQUESTED_MODEL)
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+            config.model_catalog =
+                Some(bundled_models_response().expect("bundled models.json should parse"));
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn(TURN_1_PROMPT).await?;
+
+    let child_body = wait_for_requests(&child_request).await?[0].body_json();
+    let child_thread_id = ThreadId::from_string(
+        child_body["client_metadata"]["thread_id"]
+            .as_str()
+            .expect("child thread id"),
+    )?;
+    let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !matches!(child_thread.agent_status().await, AgentStatus::Completed(_)) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let _ = wait_for_requests(&child_final).await?;
+    let _ = wait_for_requests(&parent_message).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    let completion_turn_ids = requests
+        .iter()
+        .filter(|request| {
+            body_contains(request, "\"author\":\"/root/worker\"")
+                && body_contains(request, "same child result")
+        })
+        .filter_map(|request| {
+            decoded_body(request)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .and_then(|body| body.get("client_metadata").cloned())
+                .and_then(|metadata| {
+                    metadata
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(completion_turn_ids.len(), 1);
+    Ok(())
 }
 
 #[test_case(CompletionScenario::Completed ; "completed")]

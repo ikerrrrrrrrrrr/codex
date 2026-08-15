@@ -3,6 +3,7 @@ use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::WakeUpSource;
@@ -15,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 static PENDING_MAILBOX_MESSAGES: Gauge = Gauge::new("core.mailbox.pending");
+const RECENT_RUNTIME_ID_LIMIT: usize = 256;
 
 /// Input consumed by a regular turn.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -43,6 +45,7 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    recent_runtime_ids: Mutex<VecDeque<ResponseItemId>>,
     non_user_wakes: Mutex<VecDeque<PendingNonUserWake>>,
 }
 
@@ -63,6 +66,7 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            recent_runtime_ids: Mutex::new(VecDeque::new()),
             non_user_wakes: Mutex::new(VecDeque::new()),
         }
     }
@@ -95,6 +99,11 @@ impl InputQueue {
         communication: InterAgentCommunication,
         parent_turn_id: Option<String>,
     ) {
+        if let Some(id) = communication.id.as_ref()
+            && self.runtime_id_was_seen(id).await
+        {
+            return;
+        }
         self.mailbox_pending_mails
             .lock()
             .await
@@ -113,10 +122,28 @@ impl InputQueue {
     /// Queues runtime work that should be consumed by the active turn or wake the next one.
     pub(crate) async fn enqueue_non_user_wake(&self, input: TurnInput, source: WakeUpSource) {
         debug_assert!(!matches!(input, TurnInput::UserInput { .. }));
+        if let TurnInput::ResponseItem(item) = &input
+            && let Some(id) = item.id()
+            && self.runtime_id_was_seen(id).await
+        {
+            return;
+        }
         self.non_user_wakes
             .lock()
             .await
             .push_back(PendingNonUserWake { input, source });
+    }
+
+    async fn runtime_id_was_seen(&self, id: &ResponseItemId) -> bool {
+        let mut recent_ids = self.recent_runtime_ids.lock().await;
+        if recent_ids.contains(id) {
+            return true;
+        }
+        if recent_ids.len() == RECENT_RUNTIME_ID_LIMIT {
+            recent_ids.pop_front();
+        }
+        recent_ids.push_back(id.clone());
+        false
     }
 
     pub(crate) async fn has_pending_non_user_wakes(&self) -> bool {
@@ -392,6 +419,63 @@ mod tests {
         assert_eq!(
             *activity_rx.borrow_and_update(),
             InputQueueActivity::Mailbox
+        );
+    }
+
+    #[tokio::test]
+    async fn input_queue_deduplicates_mailbox_items_by_id() {
+        let input_queue = InputQueue::new();
+        let mut communication = make_mail(
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            AgentPath::root(),
+            "result",
+            /*trigger_turn*/ true,
+        );
+        communication.id = Some(ResponseItemId::with_suffix("iac", "completion-worker-turn"));
+
+        input_queue
+            .enqueue_mailbox_communication(communication.clone(), /*parent_turn_id*/ None)
+            .await;
+        input_queue
+            .enqueue_mailbox_communication(communication.clone(), /*parent_turn_id*/ None)
+            .await;
+
+        assert_eq!(
+            input_queue.drain_mailbox_input_items().await,
+            (
+                vec![TurnInput::InterAgentCommunication(communication)],
+                None
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn input_queue_deduplicates_non_user_wakes_by_id() {
+        let input_queue = InputQueue::new();
+        let item = ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("iac", "completion-worker-turn")),
+            role: "user".to_string(),
+            content: Vec::new(),
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        input_queue
+            .enqueue_non_user_wake(
+                TurnInput::ResponseItem(item.clone()),
+                WakeUpSource::Subagent,
+            )
+            .await;
+        input_queue
+            .enqueue_non_user_wake(
+                TurnInput::ResponseItem(item.clone()),
+                WakeUpSource::Subagent,
+            )
+            .await;
+
+        assert_eq!(
+            input_queue.drain_non_user_wakes().await,
+            vec![TurnInput::ResponseItem(item)]
         );
     }
 

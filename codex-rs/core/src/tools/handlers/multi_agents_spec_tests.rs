@@ -414,7 +414,7 @@ fn wait_agent_tool_v2_uses_immediate_summary_output() {
         .expect("wait_agent should use object params");
     assert!(!properties.contains_key("targets"));
     assert!(!properties.contains_key("timeout_ms"));
-    assert!(description.contains("Return whether agent or user updates are currently queued"));
+    assert!(description.contains("This is a point-in-time snapshot, not a completion wait"));
     assert_eq!(parameters.required.as_ref(), None);
     assert_eq!(
         output_schema.expect("wait output schema")["properties"]["message"]["description"],

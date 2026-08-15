@@ -74,8 +74,6 @@ impl Handler {
             });
         }
 
-        let _ = args.timeout_ms;
-
         session
             .emit_turn_item_started(
                 &turn,
@@ -185,7 +183,8 @@ impl CoreToolRuntime for Handler {
 struct WaitArgs {
     #[serde(default)]
     targets: Vec<String>,
-    timeout_ms: Option<i64>,
+    #[serde(default, rename = "timeout_ms")]
+    _legacy_timeout_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -535,9 +535,13 @@ impl CodexThread {
     /// Records a runtime-produced user-role message and ensures the parent gets a turn to
     /// process it. Unlike a signal-only wake, the payload remains durable across active-turn
     /// races.
-    pub(crate) async fn wake_from_non_user_message(&self, message: String) {
+    pub(crate) async fn wake_from_non_user_message(
+        &self,
+        message: String,
+        item_id: codex_protocol::ResponseItemId,
+    ) {
         let item = ResponseItem::Message {
-            id: None,
+            id: Some(item_id),
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text: message }],
             phase: None,

@@ -3,7 +3,6 @@ use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
-use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
@@ -24,6 +23,7 @@ use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -51,6 +51,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use tokio::sync::watch;
 use tracing::warn;
+use uuid::Uuid;
 
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
@@ -65,6 +66,30 @@ mod spawn;
 pub(crate) enum SpawnAgentForkMode {
     FullHistory,
     LastNTurns(usize),
+}
+
+pub(crate) struct ChildCompletionNotification<'a> {
+    pub(crate) parent_thread_id: ThreadId,
+    pub(crate) child_thread_id: ThreadId,
+    pub(crate) child_agent_path: Option<&'a AgentPath>,
+    pub(crate) child_turn_id: &'a str,
+    pub(crate) multi_agent_version: MultiAgentVersion,
+    pub(crate) status: &'a AgentStatus,
+    pub(crate) delivery: ChildCompletionDelivery,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChildCompletionDelivery {
+    WakeParent,
+    QueueForParent,
+}
+
+fn child_completion_item_id(child_thread_id: ThreadId, child_turn_id: &str) -> ResponseItemId {
+    let completion_key = format!("{child_thread_id}:{child_turn_id}");
+    ResponseItemId::with_suffix(
+        "iac",
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, completion_key.as_bytes()),
+    )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -476,95 +501,66 @@ impl AgentControl {
         Ok(agents)
     }
 
-    /// Starts a detached watcher for sub-agents spawned from another thread.
-    ///
-    /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and
-    /// can receive completion notifications.
-    fn maybe_start_completion_watcher(
+    /// Delivers one terminal child-turn result to its direct parent.
+    pub(crate) async fn notify_parent_of_child_completion(
         &self,
-        child_thread_id: ThreadId,
-        session_source: Option<SessionSource>,
-        child_reference: String,
-        child_agent_path: Option<AgentPath>,
-    ) {
-        let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
-        })) = session_source
-        else {
-            return;
-        };
-        let control = self.clone();
-        tokio::spawn(async move {
-            let status = match control.subscribe_status(child_thread_id).await {
-                Ok(mut status_rx) => {
-                    let mut status = status_rx.borrow().clone();
-                    while !is_final(&status) {
-                        if status_rx.changed().await.is_err() {
-                            status = control.get_status(child_thread_id).await;
-                            break;
-                        }
-                        status = status_rx.borrow().clone();
-                    }
-                    status
-                }
-                Err(_) => control.get_status(child_thread_id).await,
-            };
-            if !is_final(&status) {
-                return;
-            }
-            let Ok(state) = control.upgrade() else {
-                return;
-            };
-            let child_thread = state.get_thread(child_thread_id).await.ok();
-            let child_uses_multi_agent_v2 = match child_thread.as_ref() {
-                Some(child_thread) => {
-                    child_thread.multi_agent_version() == Some(MultiAgentVersion::V2)
-                }
-                None => true,
-            };
-            if child_agent_path.is_some() && child_uses_multi_agent_v2 {
-                let Some(child_agent_path) = child_agent_path.clone() else {
-                    return;
-                };
-                let Some(parent_agent_path) = child_agent_path
+        notification: ChildCompletionNotification<'_>,
+    ) -> Option<String> {
+        let parent_thread_id = notification.parent_thread_id;
+        let completion_id =
+            child_completion_item_id(notification.child_thread_id, notification.child_turn_id);
+        match notification.multi_agent_version {
+            MultiAgentVersion::V2 => {
+                let child_agent_path = notification.child_agent_path.cloned()?;
+                let parent_agent_path = child_agent_path
                     .as_str()
                     .rsplit_once('/')
-                    .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
-                else {
-                    return;
-                };
-                let Some(message) = format_inter_agent_completion_message(
+                    .and_then(|(parent, _)| AgentPath::try_from(parent).ok())?;
+                let message = format_inter_agent_completion_message(
                     parent_agent_path.clone(),
                     child_agent_path.clone(),
-                    &status,
-                ) else {
-                    return;
-                };
-                let communication = InterAgentCommunication::new(
+                    notification.status,
+                )?;
+                let mut communication = InterAgentCommunication::new(
                     child_agent_path,
                     parent_agent_path,
                     Vec::new(),
-                    message,
-                    /*trigger_turn*/ true,
+                    message.clone(),
+                    /*trigger_turn*/
+                    matches!(notification.delivery, ChildCompletionDelivery::WakeParent),
                 );
-                let context =
-                    AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id);
-                let _ = control
-                    .send_inter_agent_communication(
-                        parent_thread_id,
-                        communication,
-                        context,
-                        /*parent_turn_id*/ None,
-                    )
-                    .await;
-                return;
+                communication.id = Some(completion_id);
+                let context = AgentCommunicationContext::new(
+                    AgentCommunicationKind::Result,
+                    notification.child_thread_id,
+                );
+                self.send_inter_agent_communication(
+                    parent_thread_id,
+                    communication,
+                    context,
+                    /*parent_turn_id*/ None,
+                )
+                .await
+                .ok()
+                .map(|_| message)
             }
-            let message = format_subagent_notification_message(child_reference.as_str(), &status);
-            let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
-                return;
-            };
-            parent_thread.wake_from_non_user_message(message).await;
-        });
+            MultiAgentVersion::V1 | MultiAgentVersion::Disabled => {
+                let child_reference = notification
+                    .child_agent_path
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| notification.child_thread_id.to_string());
+                let message =
+                    format_subagent_notification_message(&child_reference, notification.status);
+                let Ok(state) = self.upgrade() else {
+                    return None;
+                };
+                let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+                    return None;
+                };
+                Box::pin(parent_thread.wake_from_non_user_message(message, completion_id)).await;
+                None
+            }
+        }
     }
 
     fn prepare_agent_metadata(

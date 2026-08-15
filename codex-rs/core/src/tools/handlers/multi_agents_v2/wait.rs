@@ -43,8 +43,7 @@ impl Handler {
             ..
         } = invocation;
         let arguments = function_arguments(payload)?;
-        let args: WaitArgs = parse_arguments(&arguments)?;
-        let _ = args.timeout_ms;
+        let _: InspectArgs = parse_arguments(&arguments)?;
 
         let turn_state = session
             .input_queue
@@ -105,8 +104,9 @@ impl CoreToolRuntime for Handler {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WaitArgs {
-    timeout_ms: Option<i64>,
+struct InspectArgs {
+    #[serde(default, rename = "timeout_ms")]
+    _legacy_timeout_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

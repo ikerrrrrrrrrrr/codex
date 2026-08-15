@@ -60,6 +60,7 @@ pub(crate) struct Session {
     pub(crate) pending_user_message_admissions:
         crate::user_message_admission::PendingUserMessageAdmissions,
     pub(crate) input_queue: InputQueue,
+    pub(crate) sent_agent_message_receivers: Mutex<HashSet<ThreadId>>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
@@ -1314,6 +1315,7 @@ impl Session {
                 async_hook_results,
                 pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
+                sent_agent_message_receivers: Mutex::new(HashSet::new()),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,

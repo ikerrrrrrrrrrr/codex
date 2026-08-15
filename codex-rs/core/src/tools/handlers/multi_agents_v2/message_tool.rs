@@ -91,10 +91,16 @@ pub(crate) async fn handle_message_string_tool(
         .ensure_v2_agent_loaded(resume_config, receiver_thread_id)
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
-    let author = turn
-        .session_source
-        .get_agent_path()
-        .unwrap_or_else(AgentPath::root);
+    let author = session
+        .services
+        .agent_control
+        .ensure_agent_known(session.thread_id)
+        .map_err(|err| collab_agent_error(session.thread_id, err))?
+        .agent_path
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel("sending agent is missing an agent_path".to_string())
+        })?;
+    let records_receiver = mode == MessageDeliveryMode::Message;
     let communication = communication_from_tool_message(
         author,
         receiver_agent_path.clone(),
@@ -116,6 +122,13 @@ pub(crate) async fn handle_message_string_tool(
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
     result?;
+    if records_receiver {
+        session
+            .sent_agent_message_receivers
+            .lock()
+            .await
+            .insert(receiver_thread_id);
+    }
     emit_sub_agent_activity(
         &session,
         &turn,

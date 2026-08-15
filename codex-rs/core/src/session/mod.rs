@@ -12,10 +12,10 @@ use std::time::UNIX_EPOCH;
 
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
+use crate::agent::ChildCompletionDelivery;
+use crate::agent::ChildCompletionNotification;
 use crate::agent::agent_status_from_event;
 use crate::agent::status::is_final;
-use crate::agent_communication::AgentCommunicationContext;
-use crate::agent_communication::AgentCommunicationKind;
 use crate::attestation::AttestationProvider;
 use crate::compact;
 use crate::compact::CompactedHistoryMetadata;
@@ -39,7 +39,6 @@ use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnEnvironment;
-use crate::session_prefix::format_inter_agent_completion_message;
 use crate::skills_load_input_from_config;
 use crate::turn_metadata::TurnMetadataState;
 use crate::turn_timing::now_unix_timestamp_ms;
@@ -1950,23 +1949,19 @@ impl Session {
         }
     }
 
-    /// Forwards terminal turn events from spawned MultiAgentV2 children to their direct parent.
+    /// Forwards terminal turns from spawned children to their direct parent.
     async fn maybe_notify_parent_of_terminal_turn(
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
     ) {
-        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
-            return;
-        }
-
         if !matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) {
             return;
         }
 
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
-            agent_path: Some(child_agent_path),
+            agent_path: child_agent_path,
             ..
         }) = &turn_context.session_source
         else {
@@ -1989,75 +1984,37 @@ impl Session {
         if !is_final(&status) {
             return;
         }
-
-        self.forward_child_completion_to_parent(
-            turn_context,
-            *parent_thread_id,
-            child_agent_path,
-            status,
-        )
-        .await;
-    }
-
-    /// Sends the standard completion envelope from a spawned MultiAgentV2 child to its parent.
-    async fn forward_child_completion_to_parent(
-        &self,
-        turn_context: &TurnContext,
-        parent_thread_id: ThreadId,
-        child_agent_path: &codex_protocol::AgentPath,
-        status: AgentStatus,
-    ) {
-        let Some(parent_agent_path) = child_agent_path
-            .as_str()
-            .rsplit_once('/')
-            .and_then(|(parent, _)| codex_protocol::AgentPath::try_from(parent).ok())
-        else {
-            return;
+        let sent_to_parent = {
+            let mut receivers = self.sent_agent_message_receivers.lock().await;
+            let sent_to_parent = receivers.contains(parent_thread_id);
+            receivers.clear();
+            sent_to_parent
         };
 
-        let Some(message) = format_inter_agent_completion_message(
-            parent_agent_path.clone(),
-            child_agent_path.clone(),
-            &status,
-        ) else {
-            return;
-        };
-        // `communication` owns the message. Keep a second copy only when the
-        // recorder will actually need it after parent delivery succeeds.
         let trace_message = self
             .services
-            .rollout_thread_trace
-            .is_enabled()
-            .then(|| message.clone());
-        let communication = InterAgentCommunication::new(
-            child_agent_path.clone(),
-            parent_agent_path,
-            Vec::new(),
-            message,
-            /*trigger_turn*/ true,
-        );
-        let context =
-            AgentCommunicationContext::new(AgentCommunicationKind::Result, self.thread_id);
-        if let Err(err) = self
-            .services
             .agent_control
-            .send_inter_agent_communication(
-                parent_thread_id,
-                communication,
-                context,
-                /*parent_turn_id*/ None,
-            )
-            .await
+            .notify_parent_of_child_completion(ChildCompletionNotification {
+                parent_thread_id: *parent_thread_id,
+                child_thread_id: self.thread_id,
+                child_agent_path: child_agent_path.as_ref(),
+                child_turn_id: turn_context.sub_id.as_str(),
+                multi_agent_version: turn_context.multi_agent_version,
+                status: &status,
+                delivery: if sent_to_parent {
+                    ChildCompletionDelivery::QueueForParent
+                } else {
+                    ChildCompletionDelivery::WakeParent
+                },
+            })
+            .await;
+        if let (Some(message), Some(child_agent_path)) = (trace_message, child_agent_path.as_ref())
         {
-            debug!("failed to notify parent thread {parent_thread_id}: {err}");
-            return;
-        }
-        if let Some(message) = trace_message {
             self.services
                 .rollout_thread_trace
                 .record_agent_result_interaction(
                     turn_context.sub_id.as_str(),
-                    parent_thread_id,
+                    *parent_thread_id,
                     &AgentResultTracePayload {
                         child_agent_path: child_agent_path.as_str(),
                         message: &message,
